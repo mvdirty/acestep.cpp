@@ -298,17 +298,11 @@ static struct ggml_tensor * vae_conv_t1d(
     // w: [IC, K*OC]  xt: [IC, T_in]  ->  col: [K*OC, T_in]
     struct ggml_tensor * col = ggml_mul_mat(ctx, w, xt);
 
-    // Step 3: col2im - scatter-add columns to signal
-    // [K*OC, T_in] -> [T_out, OC] where T_out = (T_in-1)*stride + K
-    struct ggml_tensor * y = ggml_col2im_1d(ctx, col, stride, oc);
+    // Step 3: col2im - scatter-add columns to signal, fused padding crop
+    // [K*OC, T_in] -> [T_out, OC] where T_out = (T_in-1)*stride + K - 2*padding
+    struct ggml_tensor * y = ggml_col2im_1d(ctx, col, stride, oc, padding);
 
-    // Step 4: Crop padding from both sides (GGML conv_transpose_1d asserts p0==0)
-    if (padding > 0) {
-        y = ggml_view_2d(ctx, y, y->ne[0] - 2 * padding, y->ne[1],
-                         y->nb[1], padding * sizeof(float));
-    }
-
-    // Step 5: Add bias
+    // Step 4: Add bias
     if (b) {
         struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
         y = ggml_add(ctx, y, b2d);
