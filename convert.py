@@ -117,6 +117,11 @@ def add_tensors_from_sf(w, sf_path, tag):
 
     for name in names:
         info = meta[name]
+
+        # normalize: some upstream checkpoints omit the "model." prefix
+        if not name.startswith("model."):
+            name = "model." + name
+
         dtype_str = info["dtype"]
         shape = info["shape"]
         off0, off1 = info["data_offsets"]
