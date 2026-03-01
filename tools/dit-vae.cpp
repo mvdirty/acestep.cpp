@@ -342,30 +342,10 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Encode] TextEncoder (%d tokens): %.1f ms\n", S_text, timer.ms());
         debug_dump_2d(&dbg, "text_hidden", text_hidden.data(), S_text, H_text);
 
-        // 5. Lyric embedding (CPU vocab lookup from text encoder embed table)
+        // 5. Lyric embedding (vocab lookup via text encoder)
         timer.reset();
         std::vector<float> lyric_embed(H_text * S_lyric);
-        {
-            GGUFModel gf_te = {};
-            if (!gf_load(&gf_te, text_enc_gguf)) {
-                fprintf(stderr, "FATAL: cannot reopen text encoder GGUF for lyric embed\n");
-                dit_ggml_free(&model);
-                if (have_vae) vae_ggml_free(&vae);
-                return 1;
-            }
-            const void * embed_data = gf_get_data(gf_te, "embed_tokens.weight");
-            if (!embed_data) {
-                fprintf(stderr, "FATAL: embed_tokens.weight not found\n");
-                gf_close(&gf_te);
-                dit_ggml_free(&model);
-                if (have_vae) vae_ggml_free(&vae);
-                return 1;
-            }
-            qwen3_cpu_embed_lookup(embed_data, H_text,
-                                    lyric_ids.data(), S_lyric,
-                                    lyric_embed.data());
-            gf_close(&gf_te);
-        }
+        qwen3_embed_lookup(&text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
         fprintf(stderr, "[Encode] Lyric vocab lookup (%d tokens): %.1f ms\n", S_lyric, timer.ms());
         debug_dump_2d(&dbg, "lyric_embed", lyric_embed.data(), S_lyric, H_text);
 

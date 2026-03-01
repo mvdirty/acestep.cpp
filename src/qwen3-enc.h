@@ -435,27 +435,33 @@ static void qwen3_forward(Qwen3GGML * m, const int * token_ids, int S, float * o
     ggml_free(ctx);
 }
 
-// CPU vocab lookup utility
-// For lyric embedding: look up token IDs in text encoder's embed table (bf16 -> f32)
-// GGUF keeps mmapped data alive. Output: [H, S] float (H contiguous per token).
-//
-// embed_data: pointer to bf16 weight data [vocab, H] in PyTorch layout (H contiguous per row)
+// Embedding lookup via ggml graph (reuses text encoder weights + scheduler)
 // token_ids: [S] int32
 // output:    [H * S] float (ggml layout: H contiguous, S tokens)
-static void qwen3_cpu_embed_lookup(const void * embed_data, int H,
-                                    const int * token_ids, int S,
-                                    float * output) {
-    const uint16_t * bf16 = (const uint16_t *)embed_data;
-    for (int s = 0; s < S; s++) {
-        int tok = token_ids[s];
-        const uint16_t * row = bf16 + (int64_t)tok * H;
-        float * dst = output + (int64_t)s * H;
-        for (int h = 0; h < H; h++) {
-            // bf16 to f32: shift left 16 bits
-            uint32_t bits = (uint32_t)row[h] << 16;
-            memcpy(&dst[h], &bits, 4);
-        }
-    }
+static void qwen3_embed_lookup(Qwen3GGML * m, const int * token_ids, int S, float * output) {
+    int H = m->cfg.hidden_size;
+
+    size_t ctx_size = 16 * ggml_tensor_overhead() + ggml_graph_overhead();
+    struct ggml_init_params gp = { ctx_size, NULL, true };
+    struct ggml_context * ctx = ggml_init(gp);
+    struct ggml_cgraph * gf = ggml_new_graph(ctx);
+
+    struct ggml_tensor * t_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, S);
+    ggml_set_name(t_ids, "token_ids");
+    ggml_set_input(t_ids);
+
+    struct ggml_tensor * out = ggml_get_rows(ctx, m->embed_tokens, t_ids);
+    ggml_set_name(out, "embed_out");
+    ggml_set_output(out);
+    ggml_build_forward_expand(gf, out);
+
+    ggml_backend_sched_alloc_graph(m->sched, gf);
+    ggml_backend_tensor_set(t_ids, token_ids, 0, S * sizeof(int));
+    ggml_backend_sched_graph_compute(m->sched, gf);
+    ggml_backend_tensor_get(out, output, 0, (size_t)H * S * sizeof(float));
+
+    ggml_backend_sched_reset(m->sched);
+    ggml_free(ctx);
 }
 
 // Free

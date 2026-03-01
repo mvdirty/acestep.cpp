@@ -297,10 +297,7 @@ conditional and N unconditional sequences are packed into a single forward pass
 `logits = uncond + scale * (cond - uncond)`. The KV cache is a single 4D tensor
 `[D, max_seq, Nkv, n_sets]` shared across all batch elements and CFG paths. Shared
 prompts are prefilled once and cloned to other KV sets via copy, avoiding redundant
-prefills. Embedding lookup bypasses ggml_get_rows entirely: rows are read directly
-from the mmap'd GGUF file on CPU, dequantized, and uploaded as F32 input tensors.
-Decode uses a dedicated single-backend graph allocator (gallocr) with no scheduler
-dispatch overhead, while prefill uses the multi-backend scheduler for flexibility.
+prefills.
 
 ## Accuracy
 
