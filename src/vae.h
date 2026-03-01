@@ -210,7 +210,7 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
     m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, 128, 2);
 
-    // Phase 2: allocate backend buffer (im2col grid Y fix enables long-sequence conv1d)
+    // Phase 2: allocate backend buffer
     BackendPair bp = backend_init("VAE");
     m->backend = bp.backend;
     m->cpu_backend = bp.cpu_backend;
