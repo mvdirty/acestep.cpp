@@ -216,6 +216,10 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->cpu_backend = bp.cpu_backend;
     m->sched = backend_sched_new(bp, 8192);
     m->buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
+    if (!m->buf) {
+        fprintf(stderr, "[VAE] FATAL: failed to allocate weight buffer\n");
+        exit(1);
+    }
     fprintf(stderr, "[VAE] Backend: %s, Weight buffer: %.1f MB\n",
             ggml_backend_name(m->backend),
             (float)ggml_backend_buffer_get_size(m->buf) / (1024 * 1024));
