@@ -79,3 +79,18 @@ link_ggml_backends(quantize)
 # neural-codec: Oobleck VAE neural audio codec (encode/decode WAV <-> latent)
 add_executable(neural-codec tools/neural-codec.cpp)
 link_ggml_backends(neural-codec)
+
+# mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
+# The mp3/ headers are header-only and usable by dit-vae too via #include "mp3/mp3enc.h"
+add_executable(mp3-codec tools/mp3-codec.cpp)
+target_include_directories(mp3-codec PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+if(MSVC)
+    target_compile_options(mp3-codec PRIVATE /W4 /wd4100 /wd4505)
+else()
+    target_compile_options(mp3-codec PRIVATE -Wall -Wextra -Wconversion
+                          -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
+    target_link_libraries(mp3-codec PRIVATE m)
+endif()
