@@ -199,36 +199,20 @@ static int mp3enc_write_scalefactors(mp3enc_bs &                 bs,
     int slen2 = mp3enc_slen[1][gi.scalefac_compress];
     int bits  = 0;
 
-    if (gi.block_type == 2) {
-        // short blocks: 12 sfb x 3 windows
-        for (int sfb = 0; sfb < 6; sfb++) {
-            for (int w = 0; w < 3; w++) {
-                bs.put(gi.scalefac_s[sfb][w], slen1);
-                bits += slen1;
-            }
-        }
-        for (int sfb = 6; sfb < 12; sfb++) {
-            for (int w = 0; w < 3; w++) {
-                bs.put(gi.scalefac_s[sfb][w], slen2);
-                bits += slen2;
-            }
-        }
-    } else {
-        // long blocks: 21 scalefactor bands, split by scfsi
-        // bands 0..5 (scfsi band 0)
-        // bands 6..10 (scfsi band 1)
-        // bands 11..15 (scfsi band 2)
-        // bands 16..20 (scfsi band 3)
-        static const int band_start[4] = { 0, 6, 11, 16 };
-        static const int band_end[4]   = { 6, 11, 16, 21 };
+    // Long blocks: 21 scalefactor bands, split by scfsi
+    // bands 0..5 (scfsi band 0)
+    // bands 6..10 (scfsi band 1)
+    // bands 11..15 (scfsi band 2)
+    // bands 16..20 (scfsi band 3)
+    static const int band_start[4] = { 0, 6, 11, 16 };
+    static const int band_end[4]   = { 6, 11, 16, 21 };
 
-        for (int b = 0; b < 4; b++) {
-            if (gr == 0 || scfsi[b] == 0) {
-                int slen = (b < 2) ? slen1 : slen2;
-                for (int sfb = band_start[b]; sfb < band_end[b]; sfb++) {
-                    bs.put(gi.scalefac_l[sfb], slen);
-                    bits += slen;
-                }
+    for (int b = 0; b < 4; b++) {
+        if (gr == 0 || scfsi[b] == 0) {
+            int slen = (b < 2) ? slen1 : slen2;
+            for (int sfb = band_start[b]; sfb < band_end[b]; sfb++) {
+                bs.put(gi.scalefac_l[sfb], slen);
+                bits += slen;
             }
         }
     }

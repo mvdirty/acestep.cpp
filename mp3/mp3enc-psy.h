@@ -56,7 +56,6 @@ static inline float mp3enc_spreading_db(float dz) {
 struct mp3enc_psy {
     // Output: allowed distortion energy per SFB
     float xmin[MP3ENC_PSY_SFB_MAX];
-    float xmin_short[12][3];  // short block masking thresholds
 
     // Forward masking: previous granule's masking energy (per channel)
     float prev_mask[2][MP3ENC_PSY_SFB_MAX];
@@ -64,7 +63,6 @@ struct mp3enc_psy {
     // Precomputed per-SFB data (set once per sample rate)
     float ath_energy[3][MP3ENC_PSY_SFB_MAX];  // [sr_index][sfb]: ATH in linear power
     float sfb_bark[3][MP3ENC_PSY_SFB_MAX];    // [sr_index][sfb]: center freq in Bark
-    float ath_short[3][12];                   // [sr_index][sfb]: short block ATH
     bool  ath_valid;
 
     void init() {
@@ -114,26 +112,6 @@ struct mp3enc_psy {
             pos += width;
         }
         ath_valid = true;
-    }
-
-    // Precompute ATH for short block SFBs.
-    // Short blocks: 192 lines per window, freq_per_line = sr / (2*192).
-    void init_ath_short(int sr_index, const uint8_t * sfb_table, int sample_rate) {
-        float freq_per_line = (float) sample_rate / (2.0f * 192.0f);
-        int   pos           = 0;
-        for (int sfb = 0; sfb < 12; sfb++) {
-            int   width      = sfb_table[sfb * 3];  // all 3 windows have same width
-            float ath_min_db = 200.0f;
-            for (int j = 0; j < width; j++) {
-                float freq = ((float) (pos + j) + 0.5f) * freq_per_line;
-                float db   = mp3enc_ath_db(freq);
-                if (db < ath_min_db) {
-                    ath_min_db = db;
-                }
-            }
-            ath_short[sr_index][sfb] = powf(10.0f, (ath_min_db - 120.0f) * 0.1f) * (float) width;
-            pos += width;
-        }
     }
 
     // Compute masking thresholds for one granule/channel.
@@ -276,64 +254,5 @@ struct mp3enc_psy {
             // Save current mask (spread_energy, not xmin) for next granule
             prev_mask[ch][sfb] = spread_energy[sfb];
         }
-    }
-
-    // Compute masking thresholds for short blocks.
-    // Simplified model: energy-based masking with ATH, no bark spreading.
-    // Short blocks prioritize temporal resolution over spectral precision.
-    //
-    // mdct: 576 coefficients in sfb-grouped order (after reorder).
-    // sfb_table: short block SFB widths (triples: w0,w0,w0, w1,w1,w1, ...).
-    void compute_short(const float * mdct, const uint8_t * sfb_table, int sr_index) {
-        // Noise-like masking offset: -5.5 dB (ISO 11172-3 Annex D)
-        static const float offset = 0.2818f;  // 10^(-5.5/10)
-
-        int pos = 0;
-        for (int sfb = 0; sfb < 12; sfb++) {
-            int width = sfb_table[sfb * 3];
-            for (int w = 0; w < 3; w++) {
-                float e = 0.0f;
-                for (int j = 0; j < width; j++) {
-                    float x = mdct[pos + j];
-                    e += x * x;
-                }
-                pos += width;
-
-                // Masking threshold: max of ATH and energy-based mask
-                float mask         = e * offset;
-                float ath          = ath_short[sr_index][sfb];
-                xmin_short[sfb][w] = (mask > ath) ? mask : ath;
-            }
-        }
-    }
-
-    // Detect transients in the PCM for block type switching.
-    // Compares energy in 4 sub-windows of the current granule's PCM.
-    // If any sub-window has significantly more energy than its predecessor,
-    // a transient is present and short blocks should be used.
-    //
-    // pcm: pointer to this granule's 576 PCM samples (one channel)
-    // Returns true if a transient is detected.
-    static bool detect_transient(const float * pcm) {
-        // Split 576 samples into 4 sub-windows of 144 samples
-        float energy[4] = {};
-        for (int w = 0; w < 4; w++) {
-            for (int i = 0; i < 144; i++) {
-                float s = pcm[w * 144 + i];
-                energy[w] += s * s;
-            }
-            // Minimum floor to avoid division by zero
-            if (energy[w] < 1e-12f) {
-                energy[w] = 1e-12f;
-            }
-        }
-
-        // A transient is detected if any sub-window's energy jumps 10x (10 dB).
-        for (int w = 1; w < 4; w++) {
-            if (energy[w] > energy[w - 1] * 10.0f) {
-                return true;
-            }
-        }
-        return false;
     }
 };

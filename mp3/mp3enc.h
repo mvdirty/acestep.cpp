@@ -116,7 +116,6 @@ static mp3enc_t * mp3enc_init(int sample_rate, int channels, int bitrate_kbps) {
     memset(enc->sb_prev, 0, sizeof(enc->sb_prev));
     enc->psy.init();
     enc->psy.init_ath(enc->sr_index, mp3enc_sfb_long[enc->sr_index], sample_rate);
-    enc->psy.init_ath_short(enc->sr_index, mp3enc_sfb_short[enc->sr_index], sample_rate);
 
     // Bit reservoir: max 511 bytes (9 bit field main_data_begin)
     enc->resv_size = 0;
@@ -234,8 +233,7 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
     int main_data_bits  = main_data_bytes * 8;
 
     // SFB tables for this sample rate
-    const uint8_t * sfb_long  = mp3enc_sfb_long[enc->sr_index];
-    const uint8_t * sfb_short = mp3enc_sfb_short[enc->sr_index];
+    const uint8_t * sfb_long = mp3enc_sfb_long[enc->sr_index];
 
     // Process 2 granules (each is 576 samples = 18 subband slots of 32 samples)
     mp3enc_side_info si;
@@ -271,13 +269,6 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
     for (int gr = 0; gr < 2; gr++) {
         int pcm_offset = gr * 576;
 
-        // Block type: long blocks only for now.
-        // Short block infrastructure is ready (MDCT-12, sfb reorder, outer loop)
-        // but causes ODG regression at 128kbps because the simplified psy model
-        // and high scalefactor overhead outweigh the transient benefit.
-        // TODO: enable with block_type 1/3 transitions + full psy short.
-        int block_type = 0;
-
         // Step 1: filterbank + MDCT for all channels
         for (int ch = 0; ch < nch; ch++) {
             const float * ch_pcm = pcm + ch * 1152 + pcm_offset;
@@ -299,7 +290,7 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
             }
 
             // MDCT: transform subbands to 576 frequency lines
-            mp3enc_mdct_granule(enc->sb_prev[ch], enc->sb_cur[ch], mdct_lr[ch], block_type, enc->sr_index);
+            mp3enc_mdct_granule(enc->sb_prev[ch], enc->sb_cur[ch], mdct_lr[ch]);
 
             // Save current subbands as previous for next granule
             memcpy(enc->sb_prev[ch], enc->sb_cur[ch], sizeof(enc->sb_cur[ch]));
@@ -316,19 +307,14 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
             }
         }
 
-        // Step 2b: adaptive lowpass (long blocks only).
-        // For short blocks, spectral lines are interleaved so we skip lowpass.
-        if (block_type == 0) {
-            for (int ch = 0; ch < nch; ch++) {
-                for (int i = enc->lowpass_line; i < 576; i++) {
-                    mdct_lr[ch][i] = 0.0f;
-                }
+        // Step 2b: adaptive lowpass
+        for (int ch = 0; ch < nch; ch++) {
+            for (int i = enc->lowpass_line; i < 576; i++) {
+                mdct_lr[ch][i] = 0.0f;
             }
         }
 
-        // Step 3: bit allocation with combined cross-frame + intra-frame reservoir.
-        // mean_bits includes reservoir from previous frame. intra_resv tracks
-        // savings from granule 0 that granule 1 can use.
+        // Step 3: bit allocation
         int max_bits = mean_bits + intra_resv;
 
         // Don't exceed remaining budget
@@ -345,20 +331,10 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
         // Step 4: quantize each channel
         int gr_bits_used = 0;
         for (int ch = 0; ch < nch; ch++) {
-            if (block_type == 2) {
-                // Short blocks: psy model + outer loop with scalefac_s.
-                enc->psy.compute_short(mdct_lr[ch], sfb_short, enc->sr_index);
-                int bits = mp3enc_outer_loop_short(mdct_lr[ch], ix[gr][ch], si.gr[gr][ch], enc->psy.xmin_short,
-                                                   bits_per_ch, sfb_short, enc->sr_index);
-                si.gr[gr][ch].part2_3_length = bits;
-                gr_bits_used += bits;
-            } else {
-                // Long blocks: full psy model + outer loop
-                enc->psy.compute(mdct_lr[ch], sfb_long, enc->sr_index, ch);
-                int bits = mp3enc_outer_loop(mdct_lr[ch], ix[gr][ch], si.gr[gr][ch], enc->psy.xmin, bits_per_ch,
-                                             sfb_long, enc->sr_index, gr, si.scfsi[ch]);
-                gr_bits_used += bits;
-            }
+            enc->psy.compute(mdct_lr[ch], sfb_long, enc->sr_index, ch);
+            int bits = mp3enc_outer_loop(mdct_lr[ch], ix[gr][ch], si.gr[gr][ch], enc->psy.xmin, bits_per_ch, sfb_long,
+                                         enc->sr_index, gr, si.scfsi[ch]);
+            gr_bits_used += bits;
         }
 
         // Track intra-frame savings: bits not used by this granule
@@ -388,35 +364,24 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
             // Scalefactors
             mp3enc_write_scalefactors(md_bs, gi, gr, nch, si.scfsi[ch]);
 
-            // Huffman data: big_values region
-            int prev_end  = 0;
-            int n_regions = (gi.block_type == 0) ? 3 : 2;
-            for (int r = 0; r < n_regions; r++) {
+            // Huffman data: big_values region (3 regions for long blocks)
+            int prev_end = 0;
+            for (int r = 0; r < 3; r++) {
                 int reg_end;
-                if (gi.block_type != 0) {
-                    // Short blocks: 2 regions, split at line 36
-                    if (r == 0) {
-                        reg_end = (36 < gi.big_values * 2) ? 36 : gi.big_values * 2;
-                    } else {
-                        reg_end = gi.big_values * 2;
+                if (r == 0) {
+                    int acc = 0;
+                    for (int s = 0; s <= gi.region0_count; s++) {
+                        acc += sfb_long[s];
                     }
+                    reg_end = (acc < gi.big_values * 2) ? acc : gi.big_values * 2;
+                } else if (r == 1) {
+                    int acc = 0;
+                    for (int s = 0; s <= gi.region0_count + gi.region1_count + 1; s++) {
+                        acc += sfb_long[s];
+                    }
+                    reg_end = (acc < gi.big_values * 2) ? acc : gi.big_values * 2;
                 } else {
-                    // Long blocks: 3 regions from SFB boundaries
-                    if (r == 0) {
-                        int acc = 0;
-                        for (int s = 0; s <= gi.region0_count; s++) {
-                            acc += sfb_long[s];
-                        }
-                        reg_end = (acc < gi.big_values * 2) ? acc : gi.big_values * 2;
-                    } else if (r == 1) {
-                        int acc = 0;
-                        for (int s = 0; s <= gi.region0_count + gi.region1_count + 1; s++) {
-                            acc += sfb_long[s];
-                        }
-                        reg_end = (acc < gi.big_values * 2) ? acc : gi.big_values * 2;
-                    } else {
-                        reg_end = gi.big_values * 2;
-                    }
+                    reg_end = gi.big_values * 2;
                 }
 
                 int pairs = (reg_end - prev_end) / 2;
