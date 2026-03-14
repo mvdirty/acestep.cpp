@@ -150,6 +150,12 @@ static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {
         if (s != std::string::npos) {
             lyrics_after = lyrics_after.substr(s);
         }
+        // Strip "# Lyric\n" header the LM may echo back
+        // (may be preceded by "# Languages\n...\n\n")
+        size_t lp = lyrics_after.find("# Lyric\n");
+        if (lp != std::string::npos && lp < 64) {
+            lyrics_after = lyrics_after.substr(lp + 8);
+        }
         // Trim trailing whitespace
         while (!lyrics_after.empty() &&
                (lyrics_after.back() == ' ' || lyrics_after.back() == '\n' || lyrics_after.back() == '\r')) {

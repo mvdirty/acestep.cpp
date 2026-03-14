@@ -59,7 +59,8 @@ struct MetadataFSM {
     State            state    = DISABLED;
     int              name_pos = 0;
     std::vector<int> value_acc;
-    bool             enabled = false;
+    bool             enabled                 = false;
+    bool             caption_pending_newline = false;
 
     std::vector<int> bpm_name, caption_name, duration_name;
     std::vector<int> keyscale_name, language_name, timesig_name;
@@ -155,8 +156,9 @@ struct MetadataFSM {
     }
 
     void reset() {
-        state    = BPM_NAME;
-        name_pos = 0;
+        state                   = BPM_NAME;
+        name_pos                = 0;
+        caption_pending_newline = false;
         value_acc.clear();
     }
 
@@ -293,6 +295,21 @@ struct MetadataFSM {
             return;
         }
 
+        // Caption YAML continuation: after a \n in caption, check if the next
+        // token starts "duration:" (end of caption) or is a continuation line.
+        if (caption_pending_newline) {
+            caption_pending_newline = false;
+            if (!duration_name.empty() && token == duration_name[0]) {
+                // End of caption, start matching "duration:" field name
+                state    = DURATION_NAME;
+                name_pos = 1;  // already consumed first token
+                value_acc.clear();
+                return;
+            }
+            // Continuation line (e.g. YAML wrap with leading spaces), stay in CAPTION_VALUE
+            return;
+        }
+
         const std::vector<int> * name = current_name_tokens();
         if (name && name_pos < (int) name->size()) {
             name_pos++;
@@ -337,9 +354,10 @@ struct MetadataFSM {
 
         if (state == CAPTION_VALUE) {
             if (token == newline_tok) {
-                state    = DURATION_NAME;
-                name_pos = 0;
-                value_acc.clear();
+                // Don't transition yet: the caption may wrap (YAML continuation
+                // lines start with spaces). Peek at next token via a flag.
+                // We set pending_newline and check in the NEXT update call.
+                caption_pending_newline = true;
             }
             return;
         }
