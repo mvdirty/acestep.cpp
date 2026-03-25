@@ -281,8 +281,8 @@ int ace_synth_generate(AceSynth *         ctx,
         have_cover = true;
     }
 
-    // Shared params from first request (caption, lyrics, metadata, DiT settings).
-    // Per-batch: audio_codes and seed come from reqs[b].
+    // Shared params from first request (mode, duration, DiT settings).
+    // Per-batch: caption, lyrics, metadata, audio_codes, and seed come from reqs[b].
     // seed must be resolved (non-negative) before calling this function.
     AceRequest rr = reqs[0];
 
@@ -323,18 +323,8 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
-    // Extract params
-    const char * caption     = rr.caption.c_str();
-    const char * lyrics      = rr.lyrics.c_str();
-    char         bpm_str[16] = "N/A";
-    if (rr.bpm > 0) {
-        snprintf(bpm_str, sizeof(bpm_str), "%d", rr.bpm);
-    }
-    const char * bpm      = bpm_str;
-    const char * keyscale = rr.keyscale.empty() ? "N/A" : rr.keyscale.c_str();
-    const char * timesig  = rr.timesignature.empty() ? "N/A" : rr.timesignature.c_str();
-    const char * language = rr.vocal_language.empty() ? "unknown" : rr.vocal_language.c_str();
-    float        duration = rr.duration > 0 ? rr.duration : 30.0f;
+    // Extract shared params from first request
+    float duration = rr.duration > 0 ? rr.duration : 30.0f;
 
     // Resolve DiT sampling params: 0 = auto-detect from model type.
     // Turbo: 8 steps, guidance=1.0, shift=3.0
@@ -476,38 +466,7 @@ int ace_synth_generate(AceSynth *         ctx,
         instruction_str = "Fill the audio semantic mask based on the given conditions:";
     }
 
-    char metas[512];
-    snprintf(metas, sizeof(metas), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm,
-             timesig, keyscale, (int) duration);
-    std::string text_str = std::string("# Instruction\n") + instruction_str + "\n\n" + "# Caption\n" + caption +
-                           "\n\n" + "# Metas\n" + metas + "<|endoftext|>\n";
-
-    std::string lyric_str = std::string("# Languages\n") + language + "\n\n# Lyric\n" + lyrics + "<|endoftext|>";
-
-    // 3. Tokenize
-    auto text_ids  = bpe_encode(&ctx->bpe, text_str.c_str(), true);
-    auto lyric_ids = bpe_encode(&ctx->bpe, lyric_str.c_str(), true);
-    int  S_text    = (int) text_ids.size();
-    int  S_lyric   = (int) lyric_ids.size();
-    fprintf(stderr, "[Pipeline] caption: %d tokens, lyrics: %d tokens\n", S_text, S_lyric);
-
-    // 4. Text encoder forward (caption only)
-    int                H_text = ctx->text_enc.cfg.hidden_size;  // 1024
-    std::vector<float> text_hidden(H_text * S_text);
-
-    timer.reset();
-    qwen3_forward(&ctx->text_enc, text_ids.data(), S_text, text_hidden.data());
-    fprintf(stderr, "[Encode] TextEncoder (%d tokens): %.1f ms\n", S_text, timer.ms());
-    debug_dump_2d(&dbg, "text_hidden", text_hidden.data(), S_text, H_text);
-
-    // 5. Lyric embedding (vocab lookup via text encoder)
-    timer.reset();
-    std::vector<float> lyric_embed(H_text * S_lyric);
-    qwen3_embed_lookup(&ctx->text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
-    fprintf(stderr, "[Encode] Lyric vocab lookup (%d tokens): %.1f ms\n", S_lyric, timer.ms());
-    debug_dump_2d(&dbg, "lyric_embed", lyric_embed.data(), S_lyric, H_text);
-
-    // Timbre input: source latents when available, silence otherwise
+    // 2. Timbre features (shared: same reference audio or silence for all batch elements)
     const int          S_ref = 750;
     std::vector<float> timbre_feats(S_ref * 64);
     if (have_cover) {
@@ -522,13 +481,101 @@ int ace_synth_generate(AceSynth *         ctx,
         memcpy(timbre_feats.data(), ctx->silence_full.data(), S_ref * 64 * sizeof(float));
     }
 
-    timer.reset();
-    std::vector<float> enc_hidden;
-    cond_ggml_forward(&ctx->cond_enc, text_hidden.data(), S_text, lyric_embed.data(), S_lyric, timbre_feats.data(),
-                      S_ref, enc_hidden, &enc_S);
-    fprintf(stderr, "[Encode] ConditionEncoder: %.1f ms, enc_S=%d\n", timer.ms(), enc_S);
+    // 3. Per-batch text encoding.
+    // Each batch element gets its own caption, lyrics, and metadata encoded independently.
+    // TextEncoder + CondEncoder run in series (cheap: ~13ms per element).
+    // Results are padded to max_enc_S with null_cond and stacked for a single DiT batch pass.
+    int H_text = ctx->text_enc.cfg.hidden_size;  // 1024
+    int H_cond = ctx->dit.cfg.hidden_size;       // 2048
 
-    debug_dump_2d(&dbg, "enc_hidden", enc_hidden.data(), enc_S, 2048);
+    // read null_condition_emb from GPU for padding shorter encodings
+    std::vector<float> null_cond_vec(H_cond);
+    if (ctx->dit.null_condition_emb) {
+        int emb_n = (int) ggml_nelements(ctx->dit.null_condition_emb);
+        if (ctx->dit.null_condition_emb->type == GGML_TYPE_BF16) {
+            std::vector<uint16_t> bf16_buf(emb_n);
+            ggml_backend_tensor_get(ctx->dit.null_condition_emb, bf16_buf.data(), 0, emb_n * sizeof(uint16_t));
+            for (int i = 0; i < emb_n; i++) {
+                uint32_t w = (uint32_t) bf16_buf[i] << 16;
+                memcpy(&null_cond_vec[i], &w, 4);
+            }
+        } else {
+            ggml_backend_tensor_get(ctx->dit.null_condition_emb, null_cond_vec.data(), 0, emb_n * sizeof(float));
+        }
+    }
+
+    // encode each batch element independently
+    std::vector<std::vector<float>> per_enc(batch_n);
+    std::vector<int>                per_enc_S(batch_n);
+
+    for (int b = 0; b < batch_n; b++) {
+        const AceRequest & rb = reqs[b];
+
+        // per-batch metadata
+        char bpm_b[16] = "N/A";
+        if (rb.bpm > 0) {
+            snprintf(bpm_b, sizeof(bpm_b), "%d", rb.bpm);
+        }
+        const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
+        const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
+        const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
+
+        char metas_b[512];
+        snprintf(metas_b, sizeof(metas_b), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
+                 bpm_b, timesig_b, keyscale_b, (int) duration);
+        std::string text_str = std::string("# Instruction\n") + instruction_str + "\n\n" + "# Caption\n" + rb.caption +
+                               "\n\n" + "# Metas\n" + metas_b + "<|endoftext|>\n";
+        std::string lyric_str =
+            std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
+
+        // tokenize
+        auto text_ids  = bpe_encode(&ctx->bpe, text_str.c_str(), true);
+        auto lyric_ids = bpe_encode(&ctx->bpe, lyric_str.c_str(), true);
+        int  S_text    = (int) text_ids.size();
+        int  S_lyric   = (int) lyric_ids.size();
+
+        // TextEncoder forward
+        std::vector<float> text_hidden(H_text * S_text);
+        qwen3_forward(&ctx->text_enc, text_ids.data(), S_text, text_hidden.data());
+
+        // lyric embedding (vocab lookup)
+        std::vector<float> lyric_embed(H_text * S_lyric);
+        qwen3_embed_lookup(&ctx->text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
+
+        // CondEncoder forward
+        timer.reset();
+        cond_ggml_forward(&ctx->cond_enc, text_hidden.data(), S_text, lyric_embed.data(), S_lyric, timbre_feats.data(),
+                          S_ref, per_enc[b], &per_enc_S[b]);
+        fprintf(stderr, "[Encode Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, S_text, S_lyric, per_enc_S[b],
+                timer.ms());
+
+        if (b == 0) {
+            debug_dump_2d(&dbg, "text_hidden", text_hidden.data(), S_text, H_text);
+            debug_dump_2d(&dbg, "lyric_embed", lyric_embed.data(), S_lyric, H_text);
+            debug_dump_2d(&dbg, "enc_hidden", per_enc[b].data(), per_enc_S[b], H_cond);
+        }
+    }
+
+    // find max enc_S, pad shorter encodings with null_cond, stack into [H, max_enc_S, N]
+    int max_enc_S = 0;
+    for (int b = 0; b < batch_n; b++) {
+        if (per_enc_S[b] > max_enc_S) {
+            max_enc_S = per_enc_S[b];
+        }
+    }
+    enc_S = max_enc_S;
+
+    std::vector<float> enc_hidden(H_cond * max_enc_S * batch_n);
+    for (int b = 0; b < batch_n; b++) {
+        float * dst = enc_hidden.data() + b * max_enc_S * H_cond;
+        memcpy(dst, per_enc[b].data(), (size_t) per_enc_S[b] * H_cond * sizeof(float));
+        for (int s = per_enc_S[b]; s < max_enc_S; s++) {
+            memcpy(dst + s * H_cond, null_cond_vec.data(), H_cond * sizeof(float));
+        }
+    }
+    if (batch_n > 1) {
+        fprintf(stderr, "[Encode] Per-batch encoding done: max_enc_S=%d\n", max_enc_S);
+    }
 
     // Build context: [batch_n, T, ctx_ch] = src_latents[64] + chunk_mask[64]
     // Cover/Lego/Repaint: shared context replicated (cover_latents from src_audio).
@@ -654,6 +701,13 @@ int ace_synth_generate(AceSynth *         ctx,
     // DiT Generate
     std::vector<float> output(batch_n * Oc * T);
 
+    // Per-batch sequence lengths for attention padding masks.
+    // Within a synth_batch_size group, all elements share the same T (same codes),
+    // so per_S[b] = S for all b. The per_enc_S[] array has real encoder lengths
+    // from per-batch text encoding above.
+    // These become meaningful when the server/CLI batches requests with different T.
+    std::vector<int> per_S(batch_n, S);
+
     // Debug dumps (sample 0)
     debug_dump_2d(&dbg, "noise", noise.data(), T, Oc);
     debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
@@ -662,10 +716,10 @@ int ace_synth_generate(AceSynth *         ctx,
             have_cover ? " (cover)" : "");
 
     timer.reset();
-    int dit_rc =
-        dit_ggml_generate(&ctx->dit, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps,
-                          schedule.data(), output.data(), guidance_scale, &dbg,
-                          context_silence.empty() ? nullptr : context_silence.data(), cover_steps, cancel, cancel_data);
+    int dit_rc = dit_ggml_generate(&ctx->dit, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n,
+                                   num_steps, schedule.data(), output.data(), guidance_scale, &dbg,
+                                   context_silence.empty() ? nullptr : context_silence.data(), cover_steps, cancel,
+                                   cancel_data, per_S.data(), per_enc_S.data());
     if (dit_rc != 0) {
         return -1;
     }

@@ -338,39 +338,22 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         return;
     }
 
-    // expand synth_batch_size: duplicate each request for N DiT variations.
-    // resolve seeds here so the pipeline receives definitive values.
-    {
-        std::vector<AceRequest> expanded;
-        for (auto & r : ace_reqs) {
-            int sbs = r.synth_batch_size;
-            if (sbs < 1) {
-                sbs = 1;
-            }
-            // resolve seed once per original request
-            long long base_seed = r.seed;
-            if (base_seed < 0) {
-                std::random_device rd;
-                base_seed = (long long) rd();
-            }
-            for (int i = 0; i < sbs; i++) {
-                AceRequest copy = r;
-                copy.seed       = base_seed + i;
-                expanded.push_back(copy);
-            }
-        }
-        ace_reqs = std::move(expanded);
+    // expand synth_batch_size and process per-request groups.
+    // each original request = one pipeline call (same codes = same T).
+    // synth_batch_size variations within a group share the same T -> true GPU batch.
+    // different requests can have different T (code length or duration) -> separate calls.
+    // pre-compute total tracks across all groups
+    int batch_n     = (int) ace_reqs.size();
+    int total_alloc = 0;
+    for (int ri = 0; ri < batch_n; ri++) {
+        int sbs = ace_reqs[ri].synth_batch_size;
+        total_alloc += sbs < 1 ? 1 : (sbs > 9 ? 9 : sbs);
     }
-
-    // clamp to pipeline hard limit (max_batch is LM-only, synth is cheap)
-    int batch_n = (int) ace_reqs.size();
-    if (batch_n > 9) {
-        batch_n = 9;
-        ace_reqs.resize(batch_n);
-    }
+    std::vector<AceAudio> audio(total_alloc);
+    int                   audio_idx = 0;
 
     // synth gets its own mutex when LM is also configured (disjoint GPU mem).
-    // try_lock: 503 instantly if GPU busy.
+    // try_lock: 503 instantly if GPU busy. held for all groups.
     std::mutex &                 mtx = g_have_lm ? mtx_synth : mtx_lm;
     std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -382,29 +365,64 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         wake_synth();
     }
 
-    // generate N tracks (single GPU graph with N samples, each with its own context)
-    std::vector<AceAudio> audio(batch_n);
-    int rc           = ace_synth_generate(g_ctx_synth, ace_reqs.data(), src_interleaved, src_len, batch_n, audio.data(),
-                                          server_cancel, (void *) &req.is_connection_closed);
+    for (int ri = 0; ri < batch_n; ri++) {
+        auto & r   = ace_reqs[ri];
+        int    sbs = r.synth_batch_size;
+        if (sbs < 1) {
+            sbs = 1;
+        }
+        if (sbs > 9) {
+            sbs = 9;
+        }
+
+        // resolve seed once per original request
+        long long base_seed = r.seed;
+        if (base_seed < 0) {
+            std::random_device rd;
+            base_seed = (long long) rd();
+        }
+
+        // build group: N copies of the same request with consecutive seeds
+        std::vector<AceRequest> group(sbs);
+        for (int i = 0; i < sbs; i++) {
+            group[i]      = r;
+            group[i].seed = base_seed + i;
+        }
+
+        std::vector<AceAudio> group_audio(sbs);
+        int rc = ace_synth_generate(g_ctx_synth, group.data(), src_interleaved, src_len, sbs, group_audio.data(),
+                                    server_cancel, (void *) &req.is_connection_closed);
+
+        if (rc != 0) {
+            g_synth_last_use = std::chrono::steady_clock::now();
+            lock.unlock();
+            free(src_interleaved);
+            for (int j = 0; j < audio_idx; j++) {
+                ace_audio_free(&audio[j]);
+            }
+            for (int j = 0; j < sbs; j++) {
+                ace_audio_free(&group_audio[j]);
+            }
+            json_error(res, 500, "Synth generation failed");
+            return;
+        }
+
+        for (int i = 0; i < sbs; i++) {
+            audio[audio_idx++] = group_audio[i];
+        }
+    }
     g_synth_last_use = std::chrono::steady_clock::now();
     lock.unlock();
     free(src_interleaved);
-
-    if (rc != 0) {
-        for (int b = 0; b < batch_n; b++) {
-            ace_audio_free(&audio[b]);
-        }
-        json_error(res, 500, "Synth generation failed");
-        return;
-    }
+    int total_tracks = audio_idx;
 
     // output format: ?wav=1 for WAV, default MP3
     bool         output_wav = req.has_param("wav") && req.get_param_value("wav") == "1";
     const char * mime       = output_wav ? "audio/wav" : "audio/mpeg";
 
     // encode each track (peak normalize + encode)
-    std::vector<std::string> encoded(batch_n);
-    for (int b = 0; b < batch_n; b++) {
+    std::vector<std::string> encoded(total_tracks);
+    for (int b = 0; b < total_tracks; b++) {
         if (!audio[b].samples) {
             continue;
         }
@@ -435,7 +453,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     }
 
     // single track: raw audio body
-    if (batch_n == 1) {
+    if (total_tracks == 1) {
         if (encoded[0].empty()) {
             json_error(res, 500, "Audio encoding failed");
             return;
@@ -448,7 +466,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     std::string boundary = "ace-batch-boundary";
     std::string body;
 
-    for (int b = 0; b < batch_n; b++) {
+    for (int b = 0; b < total_tracks; b++) {
         body += "--" + boundary + "\r\n";
         body += "Content-Type: ";
         body += mime;

@@ -194,61 +194,70 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "[Pipeline] Batch: %d request(s)\n", batch_n);
 
-    // expand synth_batch_size: duplicate each request for N DiT variations.
-    // resolve seeds and assign consecutive seeds per copy.
-    // track local index per original request for output naming.
-    std::vector<int> synth_indices;
-    {
-        std::vector<AceRequest>  exp_reqs;
-        std::vector<std::string> exp_names;
-        for (int ri = 0; ri < batch_n; ri++) {
-            int sbs = reqs[ri].synth_batch_size;
-            if (sbs < 1) {
-                sbs = 1;
-            }
-            // resolve seed once per original request
-            long long base_seed = reqs[ri].seed;
-            if (base_seed < 0) {
-                std::random_device rd;
-                base_seed = (long long) rd();
-            }
-            for (int i = 0; i < sbs; i++) {
-                AceRequest copy = reqs[ri];
-                copy.seed       = base_seed + i;
-                exp_reqs.push_back(copy);
-                exp_names.push_back(basenames[ri]);
-                synth_indices.push_back(i);
-            }
-        }
-        reqs      = std::move(exp_reqs);
-        basenames = std::move(exp_names);
-        batch_n   = (int) reqs.size();
-        if (batch_n > 1) {
-            fprintf(stderr, "[Pipeline] Expanded to %d (synth_batch_size)\n", batch_n);
-        }
-    }
+    // process each request as a separate group (same codes = same T per group).
+    // synth_batch_size variations within a group share the same T -> true GPU batch.
+    // different requests can have different T -> separate pipeline calls.
+    std::vector<AceAudio>    all_audio;
+    std::vector<std::string> all_basenames;
+    std::vector<int>         all_synth_indices;
 
-    // Generate all in one GPU batch
-    std::vector<AceAudio> audio(batch_n);
-    if (ace_synth_generate(ctx, reqs.data(), src_interleaved, src_len, batch_n, audio.data()) != 0) {
-        fprintf(stderr, "[Pipeline] ERROR: generation failed\n");
-        free(src_interleaved);
-        ace_synth_free(ctx);
-        return 1;
+    for (int ri = 0; ri < batch_n; ri++) {
+        int sbs = reqs[ri].synth_batch_size;
+        if (sbs < 1) {
+            sbs = 1;
+        }
+
+        // resolve seed once per original request
+        long long base_seed = reqs[ri].seed;
+        if (base_seed < 0) {
+            std::random_device rd;
+            base_seed = (long long) rd();
+        }
+
+        // build group: N copies with consecutive seeds
+        std::vector<AceRequest> group(sbs);
+        for (int i = 0; i < sbs; i++) {
+            group[i]      = reqs[ri];
+            group[i].seed = base_seed + i;
+        }
+
+        if (batch_n > 1 || sbs > 1) {
+            fprintf(stderr, "[Pipeline] Group %d: %d track(s)\n", ri, sbs);
+        }
+
+        std::vector<AceAudio> group_audio(sbs);
+        if (ace_synth_generate(ctx, group.data(), src_interleaved, src_len, sbs, group_audio.data()) != 0) {
+            fprintf(stderr, "[Pipeline] ERROR: generation failed for group %d\n", ri);
+            for (auto & a : all_audio) {
+                ace_audio_free(&a);
+            }
+            for (auto & a : group_audio) {
+                ace_audio_free(&a);
+            }
+            free(src_interleaved);
+            ace_synth_free(ctx);
+            return 1;
+        }
+
+        for (int i = 0; i < sbs; i++) {
+            all_audio.push_back(group_audio[i]);
+            all_basenames.push_back(basenames[ri]);
+            all_synth_indices.push_back(i);
+        }
     }
 
     // Write output files
-    for (int b = 0; b < batch_n; b++) {
-        if (!audio[b].samples) {
+    for (int b = 0; b < (int) all_audio.size(); b++) {
+        if (!all_audio[b].samples) {
             continue;
         }
         const char * ext = output_wav ? ".wav" : ".mp3";
         char         out_path[1024];
-        snprintf(out_path, sizeof(out_path), "%s%d%s", basenames[b].c_str(), synth_indices[b], ext);
-        if (!audio_write(out_path, audio[b].samples, audio[b].n_samples, 48000, mp3_kbps)) {
+        snprintf(out_path, sizeof(out_path), "%s%d%s", all_basenames[b].c_str(), all_synth_indices[b], ext);
+        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps)) {
             fprintf(stderr, "[Batch%d] FATAL: failed to write %s\n", b, out_path);
         }
-        ace_audio_free(&audio[b]);
+        ace_audio_free(&all_audio[b]);
     }
 
     free(src_interleaved);

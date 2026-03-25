@@ -38,10 +38,10 @@ void ace_synth_default_params(AceSynthParams * p);
 AceSynth * ace_synth_load(const AceSynthParams * params);
 
 // Generate audio from N requests in a single GPU batch.
-// reqs[batch_n]: each request can have different audio_codes and seed.
-//   All requests must share the same caption, lyrics, metadata, and duration.
+// reqs[batch_n]: each request has its own caption, lyrics, metadata, audio_codes, and seed.
+//   Text encoding runs per-element, results are padded and stacked for one DiT batch pass.
 //   seed must be resolved (non-negative) before calling this function.
-//   The first request (reqs[0]) is used for text encoding and conditioning.
+//   The first request (reqs[0]) is used for shared params (mode, duration, DiT settings).
 // src_audio: interleaved stereo 48kHz (for cover/lego mode), NULL for text2music.
 // src_len: samples per channel.
 // batch_n: number of requests (1..9).

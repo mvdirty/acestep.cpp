@@ -124,7 +124,7 @@ static void apg_forward(const float *       pred_cond,
 //
 // noise:            [N * T * Oc]  N contiguous [T, Oc] noise blocks
 // context_latents:  [N * T * ctx_ch]  N contiguous context blocks
-// enc_hidden:       [enc_S * H]  SINGLE encoder output (shared, will be broadcast to N)
+// enc_hidden:       [enc_S * H * N]  per-batch encoder outputs (caller-stacked)
 // schedule:         array of num_steps timestep values
 // output:           [N * T * Oc]  generated latents (caller-allocated)
 static int dit_ggml_generate(DiTGGML *           model,
@@ -142,7 +142,9 @@ static int dit_ggml_generate(DiTGGML *           model,
                              const float *       context_switch = nullptr,
                              int                 cover_steps    = -1,
                              bool (*cancel)(void *)             = nullptr,
-                             void * cancel_data                 = nullptr) {
+                             void *      cancel_data            = nullptr,
+                             const int * real_S                 = nullptr,
+                             const int * real_enc_S             = nullptr) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -181,7 +183,8 @@ static int dit_ggml_generate(DiTGGML *           model,
     // more aggressive aliasing, causing batch sample 1+ to produce noise.
     ggml_backend_sched_reset(model->sched);
     if (model->backend != model->cpu_backend) {
-        const char * input_names[] = { "enc_hidden", "input_latents", "t", "t_r", "positions", "sw_mask" };
+        const char * input_names[] = { "enc_hidden", "input_latents", "t",           "t_r",
+                                       "positions",  "sa_mask_sw",    "sa_mask_pad", "ca_mask" };
         for (const char * iname : input_names) {
             struct ggml_tensor * t = ggml_graph_get_tensor(gf, iname);
             if (t) {
@@ -211,26 +214,59 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
     ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
 
-    // Sliding window mask: [S, S, 1, N] fp16 - N identical copies
-    struct ggml_tensor *  t_mask = ggml_graph_get_tensor(gf, "sw_mask");
-    std::vector<uint16_t> mask_data;
-    if (t_mask) {
-        int win = c.sliding_window;
-        mask_data.resize(S * S * N);
-        // fill first copy
+    // Self-attention masks: per-batch, combines sliding window and padding.
+    // GGML flash_attn_ext mask layout: [ne0=KV_len, ne1=Q_len, 1, N]
+    // Linear element offset: ki + qi*ne0 + b*ne0*ne1
+    //   sa_mask_sw  [S, S, 1, N]: layer_type=0 (sliding window + padding)
+    //   sa_mask_pad [S, S, 1, N]: layer_type=1 (full attention, padding only)
+    // When real_S is NULL, all positions are real (mask is all 0.0).
+    struct ggml_tensor * t_sa_mask_sw  = ggml_graph_get_tensor(gf, "sa_mask_sw");
+    struct ggml_tensor * t_sa_mask_pad = ggml_graph_get_tensor(gf, "sa_mask_pad");
+
+    int                   win = c.sliding_window;
+    std::vector<uint16_t> sa_sw_data(S * S * N);
+    std::vector<uint16_t> sa_pad_data(S * S * N);
+
+    for (int b = 0; b < N; b++) {
+        int rs = real_S ? real_S[b] : S;  // real sequence length for this batch element
         for (int qi = 0; qi < S; qi++) {
             for (int ki = 0; ki < S; ki++) {
-                int   dist             = (qi > ki) ? (qi - ki) : (ki - qi);
-                float v                = (dist <= win) ? 0.0f : -INFINITY;
-                mask_data[ki * S + qi] = ggml_fp32_to_fp16(v);
+                bool real_pos = (qi < rs) && (ki < rs);
+                int  dist     = (qi > ki) ? (qi - ki) : (ki - qi);
+                bool in_win   = (win <= 0) || (S <= win) || (dist <= win);
+
+                // offset = ki + qi*S + b*S*S  (ne0=S indexed by ki, ne1=S indexed by qi)
+                int off = b * S * S + qi * S + ki;
+
+                float sw_val    = (real_pos && in_win) ? 0.0f : -INFINITY;
+                sa_sw_data[off] = ggml_fp32_to_fp16(sw_val);
+
+                float pad_val    = real_pos ? 0.0f : -INFINITY;
+                sa_pad_data[off] = ggml_fp32_to_fp16(pad_val);
             }
         }
-        // replicate for batch elements 1..N-1
-        for (int b = 1; b < N; b++) {
-            memcpy(mask_data.data() + b * S * S, mask_data.data(), S * S * sizeof(uint16_t));
-        }
-        ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * N * sizeof(uint16_t));
     }
+    ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
+    ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+
+    // Cross-attention mask: per-batch encoder padding.
+    // [ne0=enc_S (KV), ne1=S (Q), 1, N] - blocks null_cond padding in enc_hidden.
+    // Value depends only on ki (encoder position), independent of qi.
+    // Linear offset for element (ki, qi, 0, b) = ki + qi*enc_S + b*enc_S*S
+    struct ggml_tensor *  t_ca_mask = ggml_graph_get_tensor(gf, "ca_mask");
+    std::vector<uint16_t> ca_data(enc_S * S * N);
+
+    for (int b = 0; b < N; b++) {
+        int re = real_enc_S ? real_enc_S[b] : enc_S;
+        for (int qi = 0; qi < S; qi++) {
+            for (int ki = 0; ki < enc_S; ki++) {
+                // offset = ki + qi*enc_S + b*enc_S*S  (ne0=enc_S indexed by ki)
+                float v                                  = (ki < re) ? 0.0f : -INFINITY;
+                ca_data[b * enc_S * S + qi * enc_S + ki] = ggml_fp32_to_fp16(v);
+            }
+        }
+    }
+    ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
 
     // CFG setup
     bool                           do_cfg = guidance_scale > 1.0f;
@@ -298,11 +334,8 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
     }
 
-    // Pre-allocate enc_buf once (avoids heap alloc per step)
-    std::vector<float> enc_buf(H * enc_S * N);
-    for (int b = 0; b < N; b++) {
-        memcpy(enc_buf.data() + b * enc_S * H, enc_hidden_data, enc_S * H * sizeof(float));
-    }
+    // enc_hidden: already [H, enc_S, N] from caller (per-batch encoded + padded)
+    std::vector<float> enc_buf(enc_hidden_data, enc_hidden_data + H * enc_S * N);
     ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
@@ -340,9 +373,9 @@ static int dit_ggml_generate(DiTGGML *           model,
         // Re-upload constants (scheduler may reuse input buffers as scratch between computes)
         ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
         ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
-        if (t_mask) {
-            ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * N * sizeof(uint16_t));
-        }
+        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
 
         // Update xt portion of input: [in_ch, T, N] (context_latents pre-filled)
         for (int b = 0; b < N; b++) {
@@ -421,9 +454,9 @@ static int dit_ggml_generate(DiTGGML *           model,
                 ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
             }
             ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N * sizeof(int32_t));
-            if (t_mask) {
-                ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * N * sizeof(uint16_t));
-            }
+            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N * sizeof(uint16_t));
 
             ggml_backend_sched_graph_compute(model->sched, gf);
             ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
