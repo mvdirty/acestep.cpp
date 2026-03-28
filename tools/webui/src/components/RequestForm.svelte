@@ -147,6 +147,7 @@
 		if (lm_top_p != null) out.lm_top_p = lm_top_p;
 		const lm_top_k = num(r.lm_top_k);
 		if (lm_top_k != null) out.lm_top_k = lm_top_k;
+		if (r.lm_negative_prompt) out.lm_negative_prompt = String(r.lm_negative_prompt);
 		const inference_steps = num(r.inference_steps);
 		if (inference_steps != null) out.inference_steps = inference_steps;
 		const guidance_scale = num(r.guidance_scale);
@@ -387,6 +388,14 @@
 	<details>
 		<summary>Advanced LM</summary>
 		<div class="details-body">
+			<label
+				>Negative prompt
+				<textarea
+					rows="4"
+					placeholder="Styles or instruments to steer away from, e.g. saxophone, autotune, screaming, low quality..."
+					bind:value={app.request.lm_negative_prompt}
+				></textarea>
+			</label>
 			<div class="meta-grid">
 				<label
 					>Temperature <input
@@ -593,6 +602,9 @@
 		color: var(--fg);
 	}
 	.details-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
 		padding: 0.25rem 0 0.5rem;
 	}
 	.selector-row {
