@@ -70,12 +70,7 @@ automatically when you pick a different one in the UI.
 
 ## LoRA
 
-Drop LoRA adapters in the `loras/` folder and start the server with:
-
-```bash
-./build/ace-server --models /path/to/models --loras /path/to/loras
-```
-
+Drop LoRA adapters in the `loras/` folder and restart the server.
 Supports PEFT directories and ComfyUI single `.safetensors` files.
 Select the active LoRA from the WebUI.
 
