@@ -5,7 +5,9 @@ build/
 tests/*/
 
 checkpoints/
-models/
+models/*.gguf
+loras/*/
+loras/*.safetensors
 __pycache__/
 node_modules/
 tools/webui/dist/

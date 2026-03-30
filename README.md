@@ -25,6 +25,18 @@ cmake .. -DGGML_VULKAN=ON
 cmake --build . --config Release -j$(nproc)
 ```
 
+### Windows
+
+Install [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+(select "Desktop development with C++" workload) and optionally the
+[CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) for NVIDIA GPU support.
+
+```cmd
+buildcuda.cmd
+```
+
+See also `buildall.cmd` for a multi-backend build (CPU + CUDA + Vulkan with runtime backend loading).
+
 Builds seven binaries: `ace-lm` (LLM), `ace-synth` (DiT + VAE), `ace-server` (HTTP server), `ace-understand` (reverse: audio -> metadata), `neural-codec` (VAE encode/decode), `mp3-codec` (MP3 encoder/decoder) and `quantize` (GGUF requantizer).
 
 ## Models
