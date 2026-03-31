@@ -437,6 +437,12 @@ to follow the caption. Lower values give more creative freedom, higher values
 preserve more of the original. Forced to 1.0 for `lego`, `extract`, `complete`.
 Ignored in `repaint` mode (the mask handles everything).
 
+**`cover_noise_strength`** (float, default `0.0`)
+Only used in `cover` mode. Blends initial noise with source latents before
+diffusion starts. `0.0` = pure noise (default). `1.0` = start nearly identical
+to the source. The schedule is truncated to the nearest timestep matching the
+noise level. `cover_steps` is recalculated against the remaining steps.
+
 **`repainting_start`** (float seconds, default `-1`)
 **`repainting_end`** (float seconds, default `-1`)
 Region boundaries for `repaint` and `complete` modes.
@@ -572,16 +578,16 @@ Required:
   --dit <gguf>            DiT GGUF file
   --vae <gguf>            VAE GGUF file
 
-Reference audio:
-  --src-audio <file>      Source audio (WAV or MP3, any sample rate)
+Audio:
+  --src-audio <file>      Source audio (WAV or MP3)
+  --ref-audio <file>      Timbre reference audio (WAV or MP3)
 
 LoRA:
   --lora <path>           LoRA safetensors file or directory
   --lora-scale <float>    LoRA scaling factor (default: 1.0)
 
 Output:
-  Default: MP3 at 128 kbps. input.json -> input0.mp3
-  Multiple requests and synth_batch_size are batched in one GPU pass.
+  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
   --wav                   Output WAV instead of MP3
 
@@ -606,10 +612,17 @@ static merge: inference runs at full speed with no adapter overhead.
 `--lora` accepts either a safetensors file or a directory containing
 `adapter_model.safetensors` and `adapter_config.json` (PEFT format).
 
-When `--src-audio` is provided, the source audio (WAV or MP3, any sample rate)
-is resampled to 48kHz, VAE-encoded once and injected as DiT context for every
-request. `audio_cover_strength` in the JSON controls how many steps use the
-source (default 0.5).
+`--src-audio` provides source content for cover, repaint, lego, extract and
+complete tasks. The audio (WAV or MP3, any sample rate) is resampled to 48kHz
+and VAE-encoded once. `audio_cover_strength` in the JSON controls how many
+DiT steps use the source context (default 0.5). `cover_noise_strength`
+blends the initial noise with source latents to start diffusion closer to
+the source (default 0.0).
+
+`--ref-audio` provides a timbre reference, independent of the task. The audio
+is VAE-encoded and its first 750 latent frames (30s) are fed to the timbre
+encoder. This conditions the DiT to match the tonal quality of the reference.
+When omitted, the timbre encoder receives silence (no timbre conditioning).
 
 Batching comes from two sources: multiple `--request` files on the CLI
 (or JSON array on the server), and `synth_batch_size` inside each request.

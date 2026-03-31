@@ -236,6 +236,8 @@ int ace_synth_generate(AceSynth *         ctx,
                        const AceRequest * reqs,
                        const float *      src_audio,
                        int                src_len,
+                       const float *      ref_audio,
+                       int                ref_len,
                        int                batch_n,
                        AceAudio *         out,
                        bool (*cancel)(void *),
@@ -294,9 +296,8 @@ int ace_synth_generate(AceSynth *         ctx,
     float rs         = rr.repainting_start;
     float re         = rr.repainting_end;
 
-    // use_source_context: task requires source latents in DiT context.
-    // Separates "audio physically present" (have_cover) from "DiT should see source".
-    // text2music ignores src_audio even if provided (uses it for timbre only).
+    // use_source_context: true when the task requires source latents in DiT context.
+    // have_cover only means src_audio is physically present (also used for timbre).
     bool use_source_context = (task == TASK_COVER || task == TASK_REPAINT || task == TASK_LEGO ||
                                task == TASK_EXTRACT || task == TASK_COMPLETE);
 
@@ -461,17 +462,33 @@ int ace_synth_generate(AceSynth *         ctx,
         rr.audio_cover_strength = 1.0f;
     }
 
-    // 2. Timbre features (shared: same reference audio or silence for all batch elements)
+    // 2. Timbre features from ref_audio (independent of src_audio).
+    // ref_audio = timbre reference, VAE-encoded to latents then first 750 frames used.
+    // NULL = silence (no timbre conditioning).
     const int          S_ref = 750;
     std::vector<float> timbre_feats(S_ref * 64);
-    if (have_cover) {
-        int copy_n = T_cover < S_ref ? T_cover : S_ref;
-        memcpy(timbre_feats.data(), cover_latents.data(), (size_t) copy_n * 64 * sizeof(float));
-        if (copy_n < S_ref) {
-            memcpy(timbre_feats.data() + (size_t) copy_n * 64, ctx->silence_full.data() + (size_t) copy_n * 64,
-                   (size_t) (S_ref - copy_n) * 64 * sizeof(float));
+    if (ref_audio && ref_len > 0) {
+        timer.reset();
+        VAEEncoder ref_vae = {};
+        vae_enc_load(&ref_vae, ctx->params.vae_path);
+        int                max_T_ref = (ref_len / 1920) + 64;
+        std::vector<float> ref_latents(max_T_ref * 64);
+        int                T_ref = vae_enc_encode_tiled(&ref_vae, ref_audio, ref_len, ref_latents.data(), max_T_ref,
+                                                        ctx->params.vae_chunk, ctx->params.vae_overlap);
+        vae_enc_free(&ref_vae);
+        if (T_ref < 0) {
+            fprintf(stderr, "[Timbre] WARNING: ref_audio encode failed, using silence\n");
+            memcpy(timbre_feats.data(), ctx->silence_full.data(), S_ref * 64 * sizeof(float));
+        } else {
+            int copy_n = T_ref < S_ref ? T_ref : S_ref;
+            memcpy(timbre_feats.data(), ref_latents.data(), (size_t) copy_n * 64 * sizeof(float));
+            if (copy_n < S_ref) {
+                memcpy(timbre_feats.data() + (size_t) copy_n * 64, ctx->silence_full.data() + (size_t) copy_n * 64,
+                       (size_t) (S_ref - copy_n) * 64 * sizeof(float));
+            }
+            fprintf(stderr, "[Timbre] ref_audio: %d frames (%.1fs), %.1f ms\n", copy_n, (float) copy_n / 25.0f,
+                    timer.ms());
         }
-        fprintf(stderr, "[Timbre] Using source latents (%d frames, %.1fs)\n", copy_n, (float) copy_n / 25.0f);
     } else {
         memcpy(timbre_feats.data(), ctx->silence_full.data(), S_ref * 64 * sizeof(float));
     }
@@ -551,8 +568,8 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
-    // non-cover encoding: re-encode text with text2music instruction for post-switch phase.
-    // same lyrics/timbre, only the instruction changes (cover -> text2music).
+    // text2music encoding: second encoding pass with DIT_INSTR_TEXT2MUSIC.
+    // used after cover_steps when audio_cover_strength < 1.0 (context switches to silence).
     bool need_enc_switch = use_source_context && !is_repaint && rr.audio_cover_strength < 1.0f;
     std::vector<std::vector<float>> per_enc_nc(batch_n);
     std::vector<int>                per_enc_S_nc(batch_n, 0);
@@ -596,7 +613,7 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
-    // find max enc_S across both cover and non-cover encodings,
+    // find max enc_S across both encodings (cover + text2music),
     // pad shorter encodings with null_cond, stack into [H, max_enc_S, N]
     int max_enc_S = 0;
     for (int b = 0; b < batch_n; b++) {
@@ -618,7 +635,7 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
-    // pad and stack non-cover encoding (same max_enc_S for graph compatibility)
+    // pad and stack text2music encoding (same max_enc_S for graph compatibility)
     std::vector<float> enc_hidden_nc;
     std::vector<int>   per_enc_S_nc_final;
     if (need_enc_switch) {
@@ -759,7 +776,7 @@ int ace_synth_generate(AceSynth *         ctx,
         fprintf(stderr, "[Context Batch%d] Philox noise seed=%lld, [%d, %d]\n", b, (long long) reqs[b].seed, T, Oc);
     }
 
-    // cover_noise_strength: start diffusion closer to source instead of pure noise.
+    // cover_noise_strength: blend initial noise with source latents.
     // xt = nearest_t * noise + (1 - nearest_t) * cover_latents, then truncate schedule.
     if (use_source_context && have_cover && rr.cover_noise_strength > 0.0f) {
         float effective_noise_level = 1.0f - rr.cover_noise_strength;

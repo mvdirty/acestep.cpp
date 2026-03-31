@@ -54,7 +54,10 @@ export const app = $state({
 	pendingIndex: 0,
 	refSongId: null as number | null,
 	refRangeStart: -1,
-	refRangeEnd: -1
+	refRangeEnd: -1,
+	srcSongId: null as number | null,
+	srcRangeStart: -1,
+	srcRangeEnd: -1
 });
 
 let toastTimer = 0;

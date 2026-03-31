@@ -76,18 +76,20 @@ export async function synthGenerate(reqs: AceRequest[], format: string): Promise
 	return parseMultipart(new Uint8Array(await res.arrayBuffer()), match[1], mime);
 }
 
-// POST synth (multipart): request(s) + source audio -> audio blob(s).
-// used when a reference audio is selected for cover/repaint.
+// POST synth (multipart): request(s) + source/reference audio -> audio blob(s).
+// src_audio = source content (cover/lego/repaint), ref_audio = timbre reference.
 export async function synthGenerateWithAudio(
 	reqs: AceRequest[],
-	audio: Blob,
+	srcAudio: Blob | null,
+	refAudio: Blob | null,
 	format: string
 ): Promise<Blob[]> {
 	const url = format === 'wav' ? 'synth?wav=1' : 'synth';
 	const body = reqs.length === 1 ? JSON.stringify(reqs[0]) : JSON.stringify(reqs);
 	const form = new FormData();
 	form.append('request', new Blob([body], { type: 'application/json' }), 'request.json');
-	form.append('audio', audio, 'input.audio');
+	if (srcAudio) form.append('audio', srcAudio, 'src.audio');
+	if (refAudio) form.append('ref_audio', refAudio, 'ref.audio');
 	const res = await fetch(url, { method: 'POST', body: form });
 	if (res.status === 503) throw new Error('Server busy');
 	if (!res.ok) {

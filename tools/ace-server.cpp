@@ -560,9 +560,10 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
 // POST /synth[?wav=1]
 // input:
 //   application/json body        -> single request {} or batch [{req0}, {req1}, ...]
-//   multipart/form-data          -> cover/repaint/lego (single request + audio)
-//     part "request": JSON text
-//     part "audio":   WAV or MP3 file
+//   multipart/form-data          -> single request + audio file(s)
+//     part "request":   JSON text
+//     part "audio":     source audio (WAV or MP3)
+//     part "ref_audio": timbre reference audio (WAV or MP3), optional
 // output: audio/mpeg (default) or audio/wav (?wav=1)
 //   batch == 1: raw audio body
 //   batch >  1: multipart/mixed, each part is raw audio
@@ -581,9 +582,11 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     std::vector<AceRequest> ace_reqs;
     float *                 src_interleaved = nullptr;
     int                     src_len         = 0;
+    float *                 ref_interleaved = nullptr;
+    int                     ref_len         = 0;
 
     if (req.is_multipart_form_data()) {
-        // multipart mode: single request + optional audio (cover/repaint/lego)
+        // multipart mode: single request + optional audio files
         AceRequest ace_req;
 
         std::string json_body;
@@ -617,6 +620,23 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
             src_interleaved = audio_planar_to_interleaved(planar, T_audio);
             free(planar);
             src_len = T_audio;
+        }
+
+        if (req.form.has_file("ref_audio")) {
+            auto file = req.form.get_file("ref_audio");
+            if (!file.content.empty()) {
+                int     T_audio = 0;
+                float * planar =
+                    audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
+                if (planar && T_audio > 0) {
+                    fprintf(stderr, "[Server] Reference audio: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
+                    ref_interleaved = audio_planar_to_interleaved(planar, T_audio);
+                    free(planar);
+                    ref_len = T_audio;
+                } else {
+                    fprintf(stderr, "[Server] WARNING: failed to decode ref_audio, ignoring\n");
+                }
+            }
         }
         ace_reqs.push_back(ace_req);
     } else {
@@ -657,6 +677,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
     if (!lock.owns_lock()) {
         free(src_interleaved);
+        free(ref_interleaved);
         json_busy(res);
         return;
     }
@@ -665,6 +686,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
     if (!ensure_synth(dit_name, sf.lora, sf.lora_scale)) {
         free(src_interleaved);
+        free(ref_interleaved);
         json_error(res, 500, "Failed to load synth pipeline");
         return;
     }
@@ -691,12 +713,13 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         }
 
         std::vector<AceAudio> group_audio(sbs);
-        int rc = ace_synth_generate(g_ctx_synth, group.data(), src_interleaved, src_len, sbs, group_audio.data(),
-                                    server_cancel, (void *) &req.is_connection_closed);
+        int rc = ace_synth_generate(g_ctx_synth, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs,
+                                    group_audio.data(), server_cancel, (void *) &req.is_connection_closed);
 
         if (rc != 0) {
             lock.unlock();
             free(src_interleaved);
+            free(ref_interleaved);
             for (int j = 0; j < audio_idx; j++) {
                 ace_audio_free(&audio[j]);
             }
@@ -713,6 +736,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     }
     lock.unlock();
     free(src_interleaved);
+    free(ref_interleaved);
     int total_tracks = audio_idx;
 
     // output format: ?wav=1 for WAV, default MP3

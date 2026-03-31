@@ -14,24 +14,33 @@
 	let rangeEnd = $state(-1);
 
 	let isRef = $derived(app.refSongId === song.id);
+	let isSrc = $derived(app.srcSongId === song.id);
 
 	function toggleRef() {
 		if (isRef) {
 			app.refSongId = null;
-			app.refRangeStart = -1;
-			app.refRangeEnd = -1;
-			rangeStart = -1;
-			rangeEnd = -1;
 		} else {
 			app.refSongId = song.id ?? null;
 		}
 	}
 
-	// sync local range to global when this song is the ref
+	function toggleSrc() {
+		if (isSrc) {
+			app.srcSongId = null;
+			app.srcRangeStart = -1;
+			app.srcRangeEnd = -1;
+			rangeStart = -1;
+			rangeEnd = -1;
+		} else {
+			app.srcSongId = song.id ?? null;
+		}
+	}
+
+	// sync local range to global when this song is the src
 	$effect(() => {
-		if (isRef) {
-			app.refRangeStart = rangeStart;
-			app.refRangeEnd = rangeEnd;
+		if (isSrc) {
+			app.srcRangeStart = rangeStart;
+			app.srcRangeEnd = rangeEnd;
 		}
 	});
 
@@ -60,6 +69,7 @@
 	async function remove() {
 		if (song.id == null) return;
 		if (app.refSongId === song.id) app.refSongId = null;
+		if (app.srcSongId === song.id) app.srcSongId = null;
 		await deleteSong(song.id);
 		const idx = app.songs.findIndex((s) => s.id === song.id);
 		if (idx >= 0) app.songs.splice(idx, 1);
@@ -97,21 +107,13 @@
 			{/if}
 		</button>
 		<span class="card-name">{song.name}</span>
-		<span class="format-badge">{song.format.toUpperCase()}</span>
-		<span class="timecode">{fmtPos(time)} / {fmtDur(dur)}</span>
 		<div class="card-actions">
-			<input
-				type="checkbox"
-				class="ref-check"
-				checked={isRef}
-				onchange={toggleRef}
-				title="Use as reference audio"
-			/>
-			<button class="icon-btn" onclick={load} title="Edit prompt"><Pencil size={14} /></button>
 			<button class="icon-btn" onclick={downloadAudio} title="Download track"
-				><Download size={14} /></button
+				><Download size={14} /> Download</button
 			>
-			<button class="icon-btn" onclick={remove} title="Delete track"><Trash2 size={14} /></button>
+			<button class="icon-btn" onclick={remove} title="Delete track"
+				><Trash2 size={14} /> Delete</button
+			>
 		</div>
 	</div>
 	<Waveform
@@ -119,10 +121,35 @@
 		bind:playing
 		bind:time
 		bind:dur
-		selectable={isRef}
+		selectable={isSrc}
 		bind:rangeStart
 		bind:rangeEnd
 	/>
+	<div class="card-footer">
+		<span class="format-badge">{song.format.toUpperCase()}</span>
+		<span class="timecode">{fmtPos(time)} / {fmtDur(dur)}</span>
+		<div class="card-actions">
+			<button class="icon-btn" onclick={load} title="Edit prompt"><Pencil size={14} /> Edit</button>
+			<label class="icon-btn"
+				><input
+					type="checkbox"
+					class="ref-check"
+					checked={isSrc}
+					onchange={toggleSrc}
+					title="Source audio"
+				/> Src</label
+			>
+			<label class="icon-btn"
+				><input
+					type="checkbox"
+					class="ref-check"
+					checked={isRef}
+					onchange={toggleRef}
+					title="Timbre reference"
+				/> Ref</label
+			>
+		</div>
+	</div>
 </div>
 
 <style>
@@ -136,6 +163,11 @@
 		background: var(--bg-card);
 	}
 	.card-header {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.card-footer {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
@@ -161,11 +193,14 @@
 		font-family: monospace;
 		color: var(--fg);
 		white-space: nowrap;
+		flex: 1;
 	}
 	.card-actions {
 		display: flex;
+		align-items: center;
 		gap: 0.2rem;
 		flex-shrink: 0;
+		font-size: 0.8rem;
 	}
 	.icon-btn {
 		background: none;
@@ -175,6 +210,8 @@
 		color: var(--fg);
 		display: flex;
 		align-items: center;
+		gap: 0.2rem;
+		font-size: 0.8rem;
 	}
 	.icon-btn:hover {
 		color: var(--focus);

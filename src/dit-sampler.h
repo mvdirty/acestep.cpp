@@ -355,7 +355,7 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
         float t_curr = schedule[step];
 
-        // Cover mode: switch context from cover to non-cover at cover_steps
+        // Cover mode: at cover_steps, swap context to silence and enc_hidden to text2music
         if (context_switch && cover_steps >= 0 && step >= cover_steps && !switched_cover) {
             switched_cover = true;
             for (int b = 0; b < N; b++) {
@@ -364,10 +364,10 @@ static int dit_ggml_generate(DiTGGML *           model,
                            ctx_ch * sizeof(float));
                 }
             }
-            // switch encoder hidden states (text re-encoded with text2music instruction)
+            // swap encoder hidden states to text2music-encoded version
             if (enc_switch) {
                 memcpy(enc_buf.data(), enc_switch, H * enc_S * N * sizeof(float));
-                // rebuild cross-attention mask with non-cover encoder lengths
+                // update cross-attention mask for text2music encoder lengths
                 if (real_enc_S_switch) {
                     for (int b = 0; b < N; b++) {
                         int re = real_enc_S_switch[b];
@@ -512,9 +512,9 @@ static int dit_ggml_generate(DiTGGML *           model,
                 xt[i] -= vt[i] * dt;
             }
 
-            // repaint injection: re-anchor preserved regions to noised source.
+            // repaint injection: replace preserved regions with noised source.
             // xt[outside mask] = t_next * noise + (1 - t_next) * clean_src
-            // only for the first half of steps (injection_ratio = 0.5)
+            // active for the first half of steps (injection_ratio = 0.5)
             if (repaint_src && repaint_t1 > repaint_t0) {
                 int injection_cutoff = (num_steps + 1) / 2;
                 if (step < injection_cutoff) {

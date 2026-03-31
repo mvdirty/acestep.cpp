@@ -42,8 +42,10 @@ AceSynth * ace_synth_load(const AceSynthParams * params);
 //   Text encoding runs per-element, results are padded and stacked for one DiT batch pass.
 //   seed must be resolved (non-negative) before calling this function.
 //   The first request (reqs[0]) is used for shared params (mode, duration, DiT settings).
-// src_audio: interleaved stereo 48kHz (for cover/lego mode), NULL for text2music.
-// src_len: samples per channel.
+// src_audio: interleaved stereo 48kHz source content, NULL for text2music.
+// src_len: samples per channel for src_audio.
+// ref_audio: interleaved stereo 48kHz timbre reference, NULL = silence (no timbre conditioning).
+// ref_len: samples per channel for ref_audio.
 // batch_n: number of requests (1..9).
 // out[batch_n] allocated by caller, filled with audio buffers.
 // cancel/cancel_data: abort callback, polled between DiT steps. NULL = never cancel.
@@ -52,6 +54,8 @@ int ace_synth_generate(AceSynth *         ctx,
                        const AceRequest * reqs,
                        const float *      src_audio,
                        int                src_len,
+                       const float *      ref_audio,
+                       int                ref_len,
                        int                batch_n,
                        AceAudio *         out,
                        bool (*cancel)(void *) = nullptr,

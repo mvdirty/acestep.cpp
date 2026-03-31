@@ -309,14 +309,14 @@
 			if (app.request.lora) synthParams.lora = app.request.lora;
 			const loraScale = num(app.request.lora_scale);
 			if (loraScale != null) synthParams.lora_scale = loraScale;
-			// repaint/complete: inject range when task requires it
+			// repaint/complete: inject range from source audio selection
 			if (
 				(t === TASK_REPAINT || t === TASK_COMPLETE) &&
-				app.refRangeStart >= 0 &&
-				app.refRangeEnd > app.refRangeStart
+				app.srcRangeStart >= 0 &&
+				app.srcRangeEnd > app.srcRangeStart
 			) {
-				synthParams.repainting_start = app.refRangeStart;
-				synthParams.repainting_end = app.refRangeEnd;
+				synthParams.repainting_start = app.srcRangeStart;
+				synthParams.repainting_end = app.srcRangeEnd;
 			}
 
 			// resolve seeds, build server payload and local expanded list for SongCard mapping.
@@ -332,12 +332,19 @@
 				}
 			}
 
-			// find ref audio if selected
+			// find source audio (cover/lego/repaint) and reference audio (timbre)
+			const srcSong = app.srcSongId != null ? app.songs.find((s) => s.id === app.srcSongId) : null;
 			const refSong = app.refSongId != null ? app.songs.find((s) => s.id === app.refSongId) : null;
 
-			const blobs = refSong
-				? await synthGenerateWithAudio(toSend, refSong.audio, app.format)
-				: await synthGenerate(toSend, app.format);
+			const blobs =
+				srcSong || refSong
+					? await synthGenerateWithAudio(
+							toSend,
+							srcSong?.audio ?? null,
+							refSong?.audio ?? null,
+							app.format
+						)
+					: await synthGenerate(toSend, app.format);
 			const now = Date.now();
 			const baseName = app.name || 'Untitled';
 			for (let i = blobs.length - 1; i >= 0; i--) {

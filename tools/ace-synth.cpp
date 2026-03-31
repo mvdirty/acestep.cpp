@@ -22,8 +22,9 @@ static void usage(const char * prog) {
             "  --embedding <gguf>      Embedding GGUF file\n"
             "  --dit <gguf>            DiT GGUF file\n"
             "  --vae <gguf>            VAE GGUF file\n\n"
-            "Reference audio:\n"
-            "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n\n"
+            "Audio:\n"
+            "  --src-audio <file>      Source audio (WAV or MP3)\n"
+            "  --ref-audio <file>      Timbre reference audio (WAV or MP3)\n\n"
             "LoRA:\n"
             "  --lora <path>           LoRA safetensors file or directory\n"
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
@@ -52,6 +53,7 @@ int main(int argc, char ** argv) {
     const char *              dit_gguf       = NULL;
     const char *              vae_gguf       = NULL;
     const char *              src_audio_path = NULL;
+    const char *              ref_audio_path = NULL;
     const char *              dump_dir       = NULL;
     const char *              lora_path      = NULL;
     float                     lora_scale     = 1.0f;
@@ -76,6 +78,8 @@ int main(int argc, char ** argv) {
             vae_gguf = argv[++i];
         } else if (!strcmp(argv[i], "--src-audio") && i + 1 < argc) {
             src_audio_path = argv[++i];
+        } else if (!strcmp(argv[i], "--ref-audio") && i + 1 < argc) {
+            ref_audio_path = argv[++i];
         } else if (!strcmp(argv[i], "--lora") && i + 1 < argc) {
             lora_path = argv[++i];
         } else if (!strcmp(argv[i], "--lora-scale") && i + 1 < argc) {
@@ -162,6 +166,32 @@ int main(int argc, char ** argv) {
         src_len = T_audio;
     }
 
+    // Read reference audio (timbre conditioning)
+    float * ref_interleaved = NULL;
+    int     ref_len         = 0;
+    if (ref_audio_path) {
+        if (!vae_gguf) {
+            fprintf(stderr, "[Timbre] ERROR: --ref-audio requires --vae\n");
+            free(src_interleaved);
+            free(ref_interleaved);
+            ace_synth_free(ctx);
+            return 1;
+        }
+        int     T_audio = 0;
+        float * planar  = audio_read_48k(ref_audio_path, &T_audio);
+        if (!planar) {
+            fprintf(stderr, "[Timbre] FATAL: cannot read --ref-audio %s\n", ref_audio_path);
+            free(src_interleaved);
+            free(ref_interleaved);
+            ace_synth_free(ctx);
+            return 1;
+        }
+        fprintf(stderr, "[Timbre] Reference audio: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
+        ref_interleaved = audio_planar_to_interleaved(planar, T_audio);
+        free(planar);
+        ref_len = T_audio;
+    }
+
     // Parse all requests
     int                      batch_n = (int) request_paths.size();
     std::vector<AceRequest>  reqs(batch_n);
@@ -173,6 +203,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Request] FATAL: failed to parse %s\n", rpath);
             ace_synth_free(ctx);
             free(src_interleaved);
+            free(ref_interleaved);
             return 1;
         }
         request_dump(&reqs[ri], stderr);
@@ -180,6 +211,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Request] FATAL: caption is empty in %s\n", rpath);
             ace_synth_free(ctx);
             free(src_interleaved);
+            free(ref_interleaved);
             return 1;
         }
         // output basename: strip .json suffix
@@ -220,7 +252,8 @@ int main(int argc, char ** argv) {
         }
 
         std::vector<AceAudio> group_audio(sbs);
-        if (ace_synth_generate(ctx, group.data(), src_interleaved, src_len, sbs, group_audio.data()) != 0) {
+        if (ace_synth_generate(ctx, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs,
+                               group_audio.data()) != 0) {
             fprintf(stderr, "[Pipeline] ERROR: generation failed for group %d\n", ri);
             for (auto & a : all_audio) {
                 ace_audio_free(&a);
@@ -229,6 +262,7 @@ int main(int argc, char ** argv) {
                 ace_audio_free(&a);
             }
             free(src_interleaved);
+            free(ref_interleaved);
             ace_synth_free(ctx);
             return 1;
         }
@@ -255,6 +289,7 @@ int main(int argc, char ** argv) {
     }
 
     free(src_interleaved);
+    free(ref_interleaved);
     ace_synth_free(ctx);
     fprintf(stderr, "[Pipeline] All done\n");
     return 0;
