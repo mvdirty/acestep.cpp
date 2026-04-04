@@ -35,7 +35,7 @@
 	let singleTrack = $derived(taskType === TASK_LEGO || taskType === TASK_EXTRACT);
 
 	// DiT input indicators
-	let hasCodes = $derived(!!app.request.audio_codes?.trim());
+	let hasCodes = $derived(!!app.request.audio_codes?.trim() && app.srcSongId == null);
 	let hasSrc = $derived(app.srcSongId != null);
 	let hasRange = $derived(app.srcRangeStart >= 0 && app.srcRangeEnd > app.srcRangeStart);
 	let hasRef = $derived(app.refSongId != null);
