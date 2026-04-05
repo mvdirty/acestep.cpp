@@ -3,6 +3,12 @@
 	import { untrack } from 'svelte';
 	import { WAVEFORM_HEIGHT } from '../lib/config.js';
 	import { app } from '../lib/state.svelte.js';
+	import {
+		getContext,
+		registerPlaying,
+		unregisterPlaying,
+		findSyncPosition
+	} from '../lib/audio.js';
 
 	let {
 		audio,
@@ -35,6 +41,7 @@
 	let source: AudioBufferSourceNode | null = null;
 	let playAt = 0;
 	let playOffset = 0;
+	let playingId = -1;
 
 	// pointer state
 	let dragging = false;
@@ -47,7 +54,7 @@
 		canvas.width = cw;
 		canvas.height = ch;
 
-		actx = new AudioContext();
+		actx = getContext();
 		gain = actx.createGain();
 		gain.gain.value = untrack(() => app.volume);
 		gain.connect(actx.destination);
@@ -68,10 +75,6 @@
 
 		return () => {
 			stopPlayback();
-			if (actx) {
-				actx.close();
-				actx = null;
-			}
 			cancelLoop();
 			canvas.removeEventListener('touchstart', preventTouch);
 			canvas.removeEventListener('touchmove', preventTouch);
@@ -97,7 +100,16 @@
 		if (!decoded || !actx) return;
 		if (wantPlay) {
 			if (actx.state === 'suspended') actx.resume();
-			startPlayback(untrack(() => time));
+			const syncPos = findSyncPosition(dur, playingId);
+			if (syncPos >= 0) {
+				// schedule start 10ms in the future, compensate offset so both
+				// tracks play the same sample at the same audio frame
+				const now = actx.currentTime;
+				const delta = 0.01;
+				startPlayback(syncPos + delta, now + delta);
+			} else {
+				startPlayback(untrack(() => time));
+			}
 			startLoop();
 		} else {
 			stopPlayback();
@@ -127,7 +139,7 @@
 		return playOffset + (actx.currentTime - playAt);
 	}
 
-	function startPlayback(offset: number) {
+	function startPlayback(offset: number, when?: number) {
 		stopPlayback();
 		if (!actx || !decoded || !gain) return;
 		const s = actx.createBufferSource();
@@ -138,16 +150,30 @@
 				source = null;
 				playing = false;
 				time = 0;
+				if (playingId >= 0) {
+					unregisterPlaying(playingId);
+					playingId = -1;
+				}
 				draw();
 			}
 		};
 		playOffset = offset;
-		playAt = actx.currentTime;
-		s.start(0, offset);
+		if (when != null) {
+			playAt = when;
+			s.start(when, offset);
+		} else {
+			playAt = actx.currentTime;
+			s.start(0, offset);
+		}
 		source = s;
+		playingId = registerPlaying(dur, currentTime);
 	}
 
 	function stopPlayback() {
+		if (playingId >= 0) {
+			unregisterPlaying(playingId);
+			playingId = -1;
+		}
 		if (source) {
 			source.onended = null;
 			try {
