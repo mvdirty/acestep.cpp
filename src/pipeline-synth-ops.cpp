@@ -54,14 +54,13 @@ static std::vector<int> parse_codes_string(const std::string & s) {
 
 struct AceSynth {
     // Models (loaded once)
-    DiTGGML       dit;
-    DiTGGMLConfig dit_cfg;
-    Qwen3GGML     text_enc;
-    CondGGML      cond_enc;
-    VAEGGML       vae;
-    DetokGGML     detok;
-    TokGGML       tok;
-    BPETokenizer  bpe;
+    DiTGGML      dit;
+    Qwen3GGML    text_enc;
+    CondGGML     cond_enc;
+    VAEGGML      vae;
+    DetokGGML    detok;
+    TokGGML      tok;
+    BPETokenizer bpe;
 
     // Metadata from DiT GGUF
     bool               is_turbo;
@@ -224,8 +223,8 @@ int ops_resolve_T(AceSynth * ctx, SynthState & s) {
     } else {
         s.T = (int) (s.duration * FRAMES_PER_SECOND);
     }
-    s.T     = ((s.T + ctx->dit_cfg.patch_size - 1) / ctx->dit_cfg.patch_size) * ctx->dit_cfg.patch_size;
-    s.S     = s.T / ctx->dit_cfg.patch_size;
+    s.T     = ((s.T + ctx->dit.cfg.patch_size - 1) / ctx->dit.cfg.patch_size) * ctx->dit.cfg.patch_size;
+    s.S     = s.T / ctx->dit.cfg.patch_size;
     s.enc_S = 0;
 
     fprintf(stderr, "[Resolve-T] T=%d, S=%d\n", s.T, s.S);

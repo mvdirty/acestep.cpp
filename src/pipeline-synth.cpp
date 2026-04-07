@@ -31,14 +31,13 @@
 
 struct AceSynth {
     // Models (loaded once)
-    DiTGGML       dit;
-    DiTGGMLConfig dit_cfg;
-    Qwen3GGML     text_enc;
-    CondGGML      cond_enc;
-    VAEGGML       vae;
-    DetokGGML     detok;
-    TokGGML       tok;
-    BPETokenizer  bpe;
+    DiTGGML      dit;
+    Qwen3GGML    text_enc;
+    CondGGML     cond_enc;
+    VAEGGML      vae;
+    DetokGGML    detok;
+    TokGGML      tok;
+    BPETokenizer bpe;
 
     // Metadata from DiT GGUF
     bool               is_turbo;
@@ -95,15 +94,15 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     fprintf(stderr, "[Synth-Load] Backend init: %.1f ms\n", timer.ms());
 
     timer.reset();
-    if (!dit_ggml_load(&ctx->dit, params->dit_path, ctx->dit_cfg, params->lora_path, params->lora_scale)) {
+    if (!dit_ggml_load(&ctx->dit, params->dit_path, params->lora_path, params->lora_scale)) {
         fprintf(stderr, "[Synth-Load] FATAL: DiT load failed\n");
         delete ctx;
         return NULL;
     }
     fprintf(stderr, "[Synth-Load] DiT weight load: %.1f ms\n", timer.ms());
 
-    ctx->Oc     = ctx->dit_cfg.out_channels;           // 64
-    ctx->ctx_ch = ctx->dit_cfg.in_channels - ctx->Oc;  // 128
+    ctx->Oc     = ctx->dit.cfg.out_channels;           // 64
+    ctx->ctx_ch = ctx->dit.cfg.in_channels - ctx->Oc;  // 128
 
     // Read DiT GGUF metadata + silence_latent tensor (once)
     ctx->is_turbo = false;
