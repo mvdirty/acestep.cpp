@@ -123,9 +123,12 @@ static int lora_read_alpha(const char * dir) {
     fseek(f, 0, SEEK_SET);
 
     std::vector<char> buf((size_t) len + 1);
-    fread(buf.data(), 1, (size_t) len, f);
-    buf[(size_t) len] = '\0';
+    size_t            nr = fread(buf.data(), 1, (size_t) len, f);
     fclose(f);
+    if (nr != (size_t) len) {
+        return 0;
+    }
+    buf[(size_t) len] = '\0';
 
     const char * json  = buf.data();
     int          alpha = 0;

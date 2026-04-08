@@ -171,13 +171,19 @@ static float * read_latent(const char * path, int * T_latent) {
     // Check magic
     char magic[4] = {};
     if (fsize >= 8) {
-        fread(magic, 1, 4, f);
+        if (fread(magic, 1, 4, f) != 4) {
+            fclose(f);
+            return NULL;
+        }
     }
 
     if (memcmp(magic, NAC8_MAGIC, 4) == 0) {
         // Q8 format
         uint32_t t;
-        fread(&t, 4, 1, f);
+        if (fread(&t, 4, 1, f) != 1) {
+            fclose(f);
+            return NULL;
+        }
         *T_latent = (int) t;
 
         long expected = NAC8_HEADER + (long) t * NAC8_FRAME;
@@ -190,11 +196,19 @@ static float * read_latent(const char * path, int * T_latent) {
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
-            fread(&scale_f16, 2, 1, f);
+            if (fread(&scale_f16, 2, 1, f) != 1) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
             float scale = ggml_fp16_to_fp32(scale_f16);
 
             int8_t q[64];
-            fread(q, 1, 64, f);
+            if (fread(q, 1, 64, f) != 64) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
 
             float * frame = data + i * 64;
             for (int j = 0; j < 64; j++) {
@@ -213,7 +227,10 @@ static float * read_latent(const char * path, int * T_latent) {
     if (memcmp(magic, NAC4_MAGIC, 4) == 0) {
         // Q4 format
         uint32_t t;
-        fread(&t, 4, 1, f);
+        if (fread(&t, 4, 1, f) != 1) {
+            fclose(f);
+            return NULL;
+        }
         *T_latent = (int) t;
 
         long expected = NAC4_HEADER + (long) t * NAC4_FRAME;
@@ -226,11 +243,19 @@ static float * read_latent(const char * path, int * T_latent) {
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
-            fread(&scale_f16, 2, 1, f);
+            if (fread(&scale_f16, 2, 1, f) != 1) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
             float scale = ggml_fp16_to_fp32(scale_f16);
 
             uint8_t packed[32];
-            fread(packed, 1, 32, f);
+            if (fread(packed, 1, 32, f) != 32) {
+                fclose(f);
+                free(data);
+                return NULL;
+            }
 
             // unpack signed nibbles
             float * frame = data + i * 64;
@@ -266,7 +291,11 @@ static float * read_latent(const char * path, int * T_latent) {
 
     *T_latent    = (int) (fsize / (64 * sizeof(float)));
     float * data = (float *) malloc(fsize);
-    fread(data, 1, fsize, f);
+    if (fread(data, 1, fsize, f) != (size_t) fsize) {
+        fclose(f);
+        free(data);
+        return NULL;
+    }
     fclose(f);
 
     float duration = (float) (*T_latent) * 1920.0f / 48000.0f;

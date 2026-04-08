@@ -83,8 +83,12 @@ static uint8_t * audio_io_load_file(const char * path, size_t * size_out) {
         fclose(fp);
         return NULL;
     }
-    fread(buf, 1, (size_t) fsize, fp);
+    size_t nr = fread(buf, 1, (size_t) fsize, fp);
     fclose(fp);
+    if (nr != (size_t) fsize) {
+        free(buf);
+        return NULL;
+    }
 
     *size_out = (size_t) fsize;
     return buf;

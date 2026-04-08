@@ -33,6 +33,11 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 # DiT tensor names can exceed default GGML_MAX_NAME of 64
 add_compile_definitions(GGML_MAX_NAME=128)
 
+# Harden: mark fread/fwrite/etc with warn_unused_result on all platforms
+if(NOT MSVC)
+    add_compile_definitions(_FORTIFY_SOURCE=2)
+endif()
+
 # CUDA architectures: cover Turing to Blackwell for distributed binaries.
 # Users can override with -DCMAKE_CUDA_ARCHITECTURES=native for local builds.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
