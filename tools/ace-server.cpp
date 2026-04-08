@@ -836,18 +836,24 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
     ace_req.lm_temperature = 0.3f;  // understand default: lower than generation
     ace_req.lm_top_p       = 1.0f;  // understand default: no nucleus sampling
 
-    float * src_interleaved = nullptr;
-    int     src_len         = 0;
+    // parse server fields + request
+    ServerFields sf;
+    float *      src_interleaved = nullptr;
+    int          src_len         = 0;
 
     if (req.is_multipart_form_data()) {
         // multipart: required "audio" part, optional "request" part for sampling params
         if (req.form.has_file("request")) {
-            if (!request_parse_json(&ace_req, req.form.get_file("request").content.c_str())) {
+            const std::string & json = req.form.get_file("request").content;
+            parse_server_fields(json.c_str(), &sf);
+            if (!request_parse_json(&ace_req, json.c_str())) {
                 json_error(res, 400, "Multipart: invalid JSON in 'request' part");
                 return;
             }
         } else if (req.form.has_field("request")) {
-            if (!request_parse_json(&ace_req, req.form.get_field("request").c_str())) {
+            const std::string & json = req.form.get_field("request");
+            parse_server_fields(json.c_str(), &sf);
+            if (!request_parse_json(&ace_req, json.c_str())) {
                 json_error(res, 400, "Multipart: invalid JSON in 'request' part");
                 return;
             }
@@ -879,6 +885,7 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         src_len = T_audio;
     } else {
         // plain JSON body: codes-only mode
+        parse_server_fields(req.body.c_str(), &sf);
         if (!request_parse_json(&ace_req, req.body.c_str())) {
             json_error(res, 400, "Invalid JSON");
             return;
@@ -894,7 +901,7 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
     }
 
     // load
-    std::string lm_name = resolve_name(g_registry.lm, "", g_loaded_lm);
+    std::string lm_name = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
     if (!ensure_lm(lm_name)) {
         free(src_interleaved);
         json_error(res, 500, "Failed to load LM");
