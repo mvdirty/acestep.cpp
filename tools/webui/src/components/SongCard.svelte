@@ -61,7 +61,7 @@
 		a.href = url;
 		const safe = song.name.replace(/[^a-zA-Z0-9 _-]/g, '') || 'song';
 		const ext = song.format === 'wav' ? '.wav' : '.mp3';
-		a.download = `${safe}_${song.seed}${ext}`;
+		a.download = `${safe}${ext}`;
 		a.click();
 		URL.revokeObjectURL(url);
 	}
