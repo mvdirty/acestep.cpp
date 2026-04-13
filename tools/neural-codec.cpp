@@ -316,6 +316,9 @@ static void print_usage(const char * prog) {
             "  -o <path>               Output file (auto-named if omitted)\n"
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n\n"
+            "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "                            Supported values: pcm16, pcm24, and fp32\n"
+            "                            (fp32 disables .wav normalization & peak clip)\n"
             "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.latent -> song.wav\n\n"
             "Memory control:\n"
@@ -338,13 +341,15 @@ static std::string auto_output(const char * input, const char * ext) {
 }
 
 int main(int argc, char ** argv) {
-    const char * vae_path    = NULL;
-    const char * input_path  = NULL;
-    const char * output_path = NULL;
-    int          chunk_size  = 256;
-    int          overlap     = 64;
-    int          mode        = -1;  // 0 = encode, 1 = decode
-    int          quant       = 0;   // 0 = f32, 8 = q8, 4 = q4
+    const char * vae_path       = NULL;
+    const char * input_path     = NULL;
+    const char * output_path    = NULL;
+    const char * wav_format_str = nullptr;
+    WavFormat    wav_format     = WAV_FORMAT_PCM_S16;
+    int          chunk_size     = 256;
+    int          overlap        = 64;
+    int          mode           = -1;  // 0 = encode, 1 = decode
+    int          quant          = 0;   // 0 = f32, 8 = q8, 4 = q4
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--vae") == 0 && i + 1 < argc) {
@@ -357,6 +362,8 @@ int main(int argc, char ** argv) {
             output_path = argv[++i];
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             output_path = argv[++i];
+        } else if (strcmp(argv[i], "--wav-format") == 0 && i + 1 < argc) {
+            wav_format_str = argv[++i];
         } else if (strcmp(argv[i], "--vae-chunk") == 0 && i + 1 < argc) {
             chunk_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--vae-overlap") == 0 && i + 1 < argc) {
@@ -380,6 +387,16 @@ int main(int argc, char ** argv) {
     }
 
     if (!vae_path || !input_path || mode < 0) {
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (mode != 1 && wav_format_str != nullptr) {
+        fprintf(stderr, "[CLI] ERROR: --wav-format requires usage of --decode\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
+        fprintf(stderr, "[CLI] ERROR: --wav-format requires a supported value\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -473,7 +490,7 @@ int main(int argc, char ** argv) {
             return 1;
         }
 
-        if (audio_write(output_path, audio.data(), T_audio, 48000, 0)) {
+        if (audio_write(output_path, audio.data(), T_audio, 48000, 0, wav_format)) {
             fprintf(stderr, "\n[VAE] Output: %s (%d samples, %.2fs @ 48kHz)\n", output_path, T_audio,
                     (float) T_audio / 48000.0f);
         } else {

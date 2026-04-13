@@ -6,11 +6,14 @@
 // Part of acestep.cpp. MIT license.
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -355,70 +358,297 @@ static float * audio_planar_to_interleaved(const float * planar, int T) {
     return out;
 }
 
-// audio_encode_wav is the core: encode planar stereo to WAV 16-bit PCM in memory.
-// 44-byte RIFF header + interleaved int16 samples.
-// audio is planar [L0..LN, R0..RN], pre-normalized by caller.
-// Does NOT normalize - caller is responsible (audio_write does it).
-// Returns empty string on failure.
-static std::string audio_encode_wav(const float * audio, int T_audio, int sr) {
-    int n_channels = 2, bits = 16;
-    int byte_rate   = sr * n_channels * (bits / 8);
-    int block_align = n_channels * (bits / 8);
-    int data_size   = T_audio * n_channels * (bits / 8);
-    int file_size   = 36 + data_size;
+static_assert(sizeof(float) == 4, "requires 32-bit float");
+static_assert(std::numeric_limits<float>::is_iec559, "requires IEEE-754 float");
+
+inline void wav_write_u16le(char *& p, std::uint16_t v) {
+    *p++ = (char) (v & 0xff);
+    *p++ = (char) ((v >> 8) & 0xff);
+}
+
+inline void wav_write_u24le(char *& p, std::uint32_t v) {
+    *p++ = (char) (v & 0xff);
+    *p++ = (char) ((v >> 8) & 0xff);
+    *p++ = (char) ((v >> 16) & 0xff);
+}
+
+inline void wav_write_u32le(char *& p, std::uint32_t v) {
+    *p++ = (char) (v & 0xff);
+    *p++ = (char) ((v >> 8) & 0xff);
+    *p++ = (char) ((v >> 16) & 0xff);
+    *p++ = (char) ((v >> 24) & 0xff);
+}
+
+inline void wav_write_f32le(char *& p, float v) {
+    std::uint32_t u;
+    std::memcpy(&u, &v, 4);
+    wav_write_u32le(p, u);
+}
+
+inline float wav_clamp1(float x) {
+    return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+}
+
+inline std::int16_t wav_quantize_s16(float x) {
+    x = wav_clamp1(x);
+    return (std::int16_t) (x * 32767.0f);
+}
+
+inline std::int32_t wav_quantize_s24(float x) {
+    x = wav_clamp1(x);
+    return (std::int32_t) (x * 8388607.0f);
+}
+
+inline void wav_write_s16le(char *& p, std::int16_t v) {
+    wav_write_u16le(p, (std::uint16_t) v);
+}
+
+inline void wav_write_s24le(char *& p, std::int32_t v) {
+    wav_write_u24le(p, (std::uint32_t) v);
+}
+
+inline void wav_write_guid_pcm(char *& p) {
+    wav_write_u32le(p, 0x00000001u);
+    wav_write_u16le(p, 0x0000u);
+    wav_write_u16le(p, 0x0010u);
+    *p++ = (char) 0x80;
+    *p++ = (char) 0x00;
+    *p++ = (char) 0x00;
+    *p++ = (char) 0xAA;
+    *p++ = (char) 0x00;
+    *p++ = (char) 0x38;
+    *p++ = (char) 0x9B;
+    *p++ = (char) 0x71;
+}
+
+inline void wav_write_header_basic(
+        char *& p,
+        int T_audio,
+        int sr,
+        int n_channels,
+        int bits,
+        std::uint16_t fmt_tag) {
+    assert(T_audio >= 0);
+    assert(sr > 0);
+    assert(n_channels > 0);
+    assert(bits == 16 || bits == 32);
+
+    const std::uint32_t bytes_per_sample = (std::uint32_t) bits / 8;
+    const std::uint32_t byte_rate        = (std::uint32_t) sr * (std::uint32_t) n_channels * bytes_per_sample;
+    const std::uint16_t block_align      = (std::uint16_t) (n_channels * (int) bytes_per_sample);
+    const std::uint32_t data_size        = (std::uint32_t) T_audio * (std::uint32_t) n_channels * bytes_per_sample;
+    const std::uint32_t file_size        = 36 + data_size;
+
+    memcpy(p, "RIFF", 4);
+    p += 4;
+    wav_write_u32le(p, file_size);
+    memcpy(p, "WAVE", 4);
+    p += 4;
+
+    memcpy(p, "fmt ", 4);
+    p += 4;
+    wav_write_u32le(p, 16);
+    wav_write_u16le(p, fmt_tag);
+    wav_write_u16le(p, (std::uint16_t) n_channels);
+    wav_write_u32le(p, (std::uint32_t) sr);
+    wav_write_u32le(p, byte_rate);
+    wav_write_u16le(p, block_align);
+    wav_write_u16le(p, (std::uint16_t) bits);
+
+    memcpy(p, "data", 4);
+    p += 4;
+    wav_write_u32le(p, data_size);
+}
+
+inline void wav_write_header_extensible_pcm_s24(
+        char *& p,
+        int T_audio,
+        int sr,
+        int n_channels) {
+    assert(T_audio >= 0);
+    assert(sr > 0);
+    assert(n_channels == 2);
+
+    const int bits = 24;
+    const std::uint32_t bytes_per_sample = 3;
+    const std::uint32_t byte_rate        = (std::uint32_t) sr * (std::uint32_t) n_channels * bytes_per_sample;
+    const std::uint16_t block_align      = (std::uint16_t) (n_channels * (int) bytes_per_sample);
+    const std::uint32_t data_size        = (std::uint32_t) T_audio * (std::uint32_t) n_channels * bytes_per_sample;
+    const std::uint32_t file_size        = 60 + data_size;
+
+    memcpy(p, "RIFF", 4);
+    p += 4;
+    wav_write_u32le(p, file_size);
+    memcpy(p, "WAVE", 4);
+    p += 4;
+
+    memcpy(p, "fmt ", 4);
+    p += 4;
+    wav_write_u32le(p, 40);
+    wav_write_u16le(p, 0xfffe);
+    wav_write_u16le(p, (std::uint16_t) n_channels);
+    wav_write_u32le(p, (std::uint32_t) sr);
+    wav_write_u32le(p, byte_rate);
+    wav_write_u16le(p, block_align);
+    wav_write_u16le(p, (std::uint16_t) bits);
+    wav_write_u16le(p, 22);
+    wav_write_u16le(p, (std::uint16_t) bits);
+    wav_write_u32le(p, 0x00000003u);
+    wav_write_guid_pcm(p);
+
+    memcpy(p, "data", 4);
+    p += 4;
+    wav_write_u32le(p, data_size);
+}
+
+inline std::string audio_encode_wav_pcm_s16(const float * audio, int T_audio, int sr) {
+    const int n_channels = 2;
+    const int bits       = 16;
+
+    assert(audio != nullptr);
+    assert(T_audio >= 0);
+    assert(sr > 0);
+
+    const std::uint32_t data_size = (std::uint32_t) T_audio * n_channels * (bits / 8);
 
     std::string out;
     out.resize(44 + (size_t) data_size);
-    char * p = &out[0];
 
-    // RIFF header
-    memcpy(p, "RIFF", 4);
-    p += 4;
-    memcpy(p, &file_size, 4);
-    p += 4;
-    memcpy(p, "WAVE", 4);
-    p += 4;
-    memcpy(p, "fmt ", 4);
-    p += 4;
-    int   fmt_size = 16;
-    short fmt_tag  = 1;
-    short nc       = (short) n_channels;
-    short ba       = (short) block_align;
-    short bp       = (short) bits;
-    memcpy(p, &fmt_size, 4);
-    p += 4;
-    memcpy(p, &fmt_tag, 2);
-    p += 2;
-    memcpy(p, &nc, 2);
-    p += 2;
-    memcpy(p, &sr, 4);
-    p += 4;
-    memcpy(p, &byte_rate, 4);
-    p += 4;
-    memcpy(p, &ba, 2);
-    p += 2;
-    memcpy(p, &bp, 2);
-    p += 2;
-    memcpy(p, "data", 4);
-    p += 4;
-    memcpy(p, &data_size, 4);
-    p += 4;
+    char * p = out.data();
+    wav_write_header_basic(p, T_audio, sr, n_channels, bits, 1);
 
-    // interleave planar float to PCM int16
-    const float * L   = audio;
-    const float * R   = audio + T_audio;
-    short *       pcm = (short *) p;
-    for (int t = 0; t < T_audio; t++) {
-        pcm[t * 2 + 0] = (short) (L[t] * 32767.0f);
-        pcm[t * 2 + 1] = (short) (R[t] * 32767.0f);
+    const float * L = audio;
+    const float * R = audio + T_audio;
+
+    for (int t = 0; t < T_audio; ++t) {
+        wav_write_s16le(p, wav_quantize_s16(L[t]));
+        wav_write_s16le(p, wav_quantize_s16(R[t]));
     }
 
     return out;
 }
 
+inline std::string audio_encode_wav_pcm_s24(const float * audio, int T_audio, int sr) {
+    const int n_channels = 2;
+    const int bits       = 24;
+
+    assert(audio != nullptr);
+    assert(T_audio >= 0);
+    assert(sr > 0);
+
+    const std::uint32_t data_size = (std::uint32_t) T_audio * n_channels * (bits / 8);
+
+    std::string out;
+    out.resize(68 + (size_t) data_size);
+
+    char * p = out.data();
+    wav_write_header_extensible_pcm_s24(p, T_audio, sr, n_channels);
+
+    const float * L = audio;
+    const float * R = audio + T_audio;
+
+    for (int t = 0; t < T_audio; ++t) {
+        wav_write_s24le(p, wav_quantize_s24(L[t]));
+        wav_write_s24le(p, wav_quantize_s24(R[t]));
+    }
+
+    return out;
+}
+
+inline std::string audio_encode_wav_ieee_f32(const float * audio, int T_audio, int sr) {
+    const int n_channels = 2;
+    const int bits       = 32;
+
+    assert(audio != nullptr);
+    assert(T_audio >= 0);
+    assert(sr > 0);
+
+    const std::uint32_t data_size = (std::uint32_t) T_audio * n_channels * (bits / 8);
+
+    std::string out;
+    out.resize(44 + (size_t) data_size);
+
+    char * p = out.data();
+    wav_write_header_basic(p, T_audio, sr, n_channels, bits, 3);
+
+    const float * L = audio;
+    const float * R = audio + T_audio;
+
+    for (int t = 0; t < T_audio; ++t) {
+        wav_write_f32le(p, L[t]);
+        wav_write_f32le(p, R[t]);
+    }
+
+    return out;
+}
+
+enum WavFormat {
+    WAV_FORMAT_PCM_S16,
+    WAV_FORMAT_PCM_S24,
+    WAV_FORMAT_IEEE_F32,
+};
+
+bool parse_optional_wav_format(const char* s, WavFormat& out) {
+    if (!s) {
+        return true;
+    }
+
+    WavFormat parsed;
+    if (std::strcmp(s, "pcm16") == 0) {
+        parsed = WAV_FORMAT_PCM_S16;
+    } else if (std::strcmp(s, "pcm24") == 0) {
+        parsed = WAV_FORMAT_PCM_S24;
+    } else if (std::strcmp(s, "fp32") == 0) {
+        parsed = WAV_FORMAT_IEEE_F32;
+    } else {
+        return false;
+    }
+
+    out = parsed;
+    return true;
+}
+
+bool should_normalize_wav_audio(WavFormat wav_format) {
+    switch (wav_format) {
+        case WAV_FORMAT_PCM_S16:
+            return true;
+        case WAV_FORMAT_PCM_S24:
+            return true;
+        case WAV_FORMAT_IEEE_F32:
+            return false;
+    }
+
+    assert(false && "unsupported wav_format");
+    std::terminate();
+}
+
+// audio_encode_wav is the core: encode planar stereo to WAV 16-bit PCM, 24-bit PCM, or 32-bit floating point in memory.
+// 16-bit PCM outputs classic RIFF header and little-endian integer samples.
+// 24-bit PCM outputs extensible header and little-endian integer samples.
+// 32-bit floating-point outputs classic RIFF header and little-endian IEEE-754 floating-point samples.
+// audio is planar [L0..LN, R0..RN], pre-normalized by caller.
+// Does NOT normalize - caller is responsible (audio_write does it).
+// NaN, -Inf, and +Inf are automatically coerced to zero.
+// 16-bit and 24-bit PCM output is automatically clamped to -1/+1 range.
+// 32-bit floating-point output may exceed -1/+1 range.
+// Returns empty string on failure.
+inline std::string audio_encode_wav(const float * audio, int T_audio, int sr, WavFormat wav_format) {
+    switch (wav_format) {
+        case WAV_FORMAT_PCM_S16:
+            return audio_encode_wav_pcm_s16(audio, T_audio, sr);
+        case WAV_FORMAT_PCM_S24:
+            return audio_encode_wav_pcm_s24(audio, T_audio, sr);
+        case WAV_FORMAT_IEEE_F32:
+            return audio_encode_wav_ieee_f32(audio, T_audio, sr);
+    }
+
+    assert(false && "unsupported wav_format");
+    std::terminate();
+}
+
 // Write planar stereo audio to WAV file. Thin wrapper around audio_encode_wav.
-static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr) {
-    std::string wav = audio_encode_wav(audio, T_audio, sr);
+static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr, WavFormat wav_format) {
+    std::string wav = audio_encode_wav(audio, T_audio, sr, wav_format);
     if (wav.empty()) {
         return false;
     }
@@ -651,11 +881,15 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
 // .mp3 -> MP3 encoding at the given kbps (default 128).
 // .wav (or anything else) -> WAV 16-bit PCM.
 // Normalizes in place before writing (single normalization point).
-static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps, int peak_clip = 10) {
-    audio_normalize(audio, T_audio * 2, peak_clip);
+static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps, WavFormat wav_format, int peak_clip = 10) {
+    const bool write_mp3 = audio_io_ends_with(path, ".mp3");
 
-    if (audio_io_ends_with(path, ".mp3")) {
+    if (write_mp3 || should_normalize_wav_audio(wav_format)) {
+        audio_normalize(audio, T_audio * 2, peak_clip);
+    }
+
+    if (write_mp3) {
         return audio_write_mp3(path, audio, T_audio, sr, (kbps > 0) ? kbps : 128);
     }
-    return audio_write_wav(path, audio, T_audio, sr);
+    return audio_write_wav(path, audio, T_audio, sr, wav_format);
 }

@@ -87,6 +87,9 @@ Select the active LoRA from the WebUI.
 --max-batch <N>      LM batch limit 1-9 (default: 1)
 --vae-chunk <N>      VAE tile size (default: 256, lower = less VRAM)
 --mp3-bitrate <N>    MP3 kbps (default: 128)
+--wav-format <fmt>   WAV audio format (default: pcm16)
+                       Supported values: pcm16, pcm24, and fp32
+                       (fp32 disables .wav normalization & peak clip)
 ```
 
 <details>

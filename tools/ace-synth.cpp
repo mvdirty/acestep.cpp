@@ -32,6 +32,9 @@ static void usage(const char * prog) {
             "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
             "  --wav                   Output WAV instead of MP3\n\n"
+            "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "                            Supported values: pcm16, pcm24, and fp32\n"
+            "                            (fp32 disables .wav normalization & peak clip)\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -64,6 +67,8 @@ int main(int argc, char ** argv) {
     int                       vae_chunk      = 256;
     int                       vae_overlap    = 64;
     bool                      output_wav     = false;  // default MP3, --wav forces WAV
+    const char *              wav_format_str = nullptr;
+    WavFormat                 wav_format     = WAV_FORMAT_PCM_S16;
     int                       mp3_kbps       = 128;
 
     for (int i = 1; i < argc; i++) {
@@ -100,6 +105,8 @@ int main(int argc, char ** argv) {
             vae_overlap = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--wav")) {
             output_wav = true;
+        } else if (!strcmp(argv[i], "--wav-format") && i + 1 < argc) {
+            wav_format_str = argv[++i];
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -124,6 +131,16 @@ int main(int argc, char ** argv) {
     }
     if (!text_enc_gguf) {
         fprintf(stderr, "[CLI] ERROR: --embedding required\n");
+        usage(argv[0]);
+        return 1;
+    }
+    if (!output_wav && wav_format_str != nullptr) {
+        fprintf(stderr, "[CLI] ERROR: --wav-format requires usage of --wav\n");
+        usage(argv[0]);
+        return 1;
+    }
+    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
+        fprintf(stderr, "[CLI] ERROR: --wav-format requires a supported value\n");
         usage(argv[0]);
         return 1;
     }
@@ -287,7 +304,7 @@ int main(int argc, char ** argv) {
         const char * ext = output_wav ? ".wav" : ".mp3";
         char         out_path[1024];
         snprintf(out_path, sizeof(out_path), "%s%d%s", all_basenames[b].c_str(), all_synth_indices[b], ext);
-        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps)) {
+        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps, wav_format)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
         }
         ace_audio_free(&all_audio[b]);

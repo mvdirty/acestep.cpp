@@ -190,9 +190,10 @@ static AceSynthParams      g_synth_params;
 static AceUnderstandParams g_und_params;
 
 // limits
-static int  g_max_batch   = 1;
-static int  g_mp3_kbps    = 128;
-static bool g_keep_loaded = false;
+static int       g_max_batch   = 1;
+static int       g_mp3_kbps    = 128;
+static WavFormat g_wav_format  = WAV_FORMAT_PCM_S16;
+static bool      g_keep_loaded = false;
 
 // job system: all compute endpoints create a job and return its ID
 // immediately. the worker thread processes jobs in FIFO order, stores
@@ -836,9 +837,13 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (!audio[b].samples) {
             continue;
         }
-        audio_normalize(audio[b].samples, audio[b].n_samples * 2, peak_clip);
+
+        if (!output_wav || should_normalize_wav_audio(g_wav_format)) {
+            audio_normalize(audio[b].samples, audio[b].n_samples * 2, peak_clip);
+        }
+
         if (output_wav) {
-            encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000);
+            encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, g_wav_format);
         } else {
             encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, g_mp3_kbps, server_cancel_job,
                                           (void *) &job->cancel);
@@ -1221,6 +1226,9 @@ static void usage(const char * prog) {
             "\n"
             "Output:\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
+            "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "                            Supported values: pcm16, pcm24, and fp32\n"
+            "                            (fp32 disables .wav normalization & peak clip)\n"
             "\n"
             "Server:\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
@@ -1240,10 +1248,11 @@ int main(int argc, char ** argv) {
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
 
-    const char * host       = "127.0.0.1";
-    int          port       = 8080;
-    const char * models_dir = nullptr;
-    const char * loras_dir  = nullptr;
+    const char * host           = "127.0.0.1";
+    int          port           = 8080;
+    const char * models_dir     = nullptr;
+    const char * loras_dir      = nullptr;
+    const char * wav_format_str = nullptr;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -1269,6 +1278,8 @@ int main(int argc, char ** argv) {
             // output
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             g_mp3_kbps = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--wav-format") && i + 1 < argc) {
+            wav_format_str = argv[++i];
 
             // server
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
@@ -1304,6 +1315,11 @@ int main(int argc, char ** argv) {
     // --models is required
     if (!models_dir) {
         fprintf(stderr, "[Server] ERROR: --models is required\n");
+        usage(argv[0]);
+        return 1;
+    }
+    if (!parse_optional_wav_format(wav_format_str, g_wav_format)) {
+        fprintf(stderr, "[Server] ERROR: --wav-format requires a supported value\n");
         usage(argv[0]);
         return 1;
     }

@@ -41,9 +41,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr,
                 "Usage: %s -i <input> -o <output> [options]\n"
                 "\n"
-                "  -i <path>   Input file (WAV or MP3)\n"
-                "  -o <path>   Output file (WAV or MP3)\n"
-                "  -b <kbps>   Bitrate for MP3 encoding (default: 128)\n"
+                "  -i <path>          Input file (WAV or MP3)\n"
+                "  -o <path>          Output file (WAV or MP3)\n"
+                "  -b <kbps>          Bitrate for MP3 encoding (default: 128)\n"
+                "  --wav-format <fmt> WAV audio format (default: pcm16)\n"
+                "                       Supported values: pcm16, pcm24, and fp32\n"
                 "\n"
                 "Mode is auto-detected from output extension.\n"
                 "\n"
@@ -58,6 +60,8 @@ int main(int argc, char ** argv) {
     const char * input   = NULL;
     const char * output  = NULL;
     int          bitrate = 128;
+    const char * wav_format_str = nullptr;
+    WavFormat    wav_format     = WAV_FORMAT_PCM_S16;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
@@ -66,6 +70,8 @@ int main(int argc, char ** argv) {
             output = argv[++i];
         } else if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             bitrate = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--wav-format") == 0 && i + 1 < argc) {
+            wav_format_str = argv[++i];
         } else {
             fprintf(stderr, "[MP3-Codec] Unknown option: %s\n", argv[i]);
             return 1;
@@ -74,6 +80,14 @@ int main(int argc, char ** argv) {
 
     if (!input || !output) {
         fprintf(stderr, "[MP3-Codec] Both -i and -o are required\n");
+        return 1;
+    }
+    if (!ends_with(output, ".wav") && wav_format_str != nullptr) {
+        fprintf(stderr, "[MP3-Codec] ERROR: --wav-format requires .wav output file\n");
+        return 1;
+    }
+    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
+        fprintf(stderr, "[MP3-Codec] ERROR: --wav-format requires a supported value\n");
         return 1;
     }
 
@@ -89,7 +103,7 @@ int main(int argc, char ** argv) {
     if (ends_with(output, ".mp3")) {
         ok = audio_write_mp3(output, audio, T, sr, bitrate);
     } else if (ends_with(output, ".wav")) {
-        ok = audio_write_wav(output, audio, T, sr);
+        ok = audio_write_wav(output, audio, T, sr, wav_format);
     } else {
         fprintf(stderr, "[MP3-Codec] Cannot determine format from output extension\n");
         fprintf(stderr, "  use .mp3 for encoding, .wav for decoding\n");
