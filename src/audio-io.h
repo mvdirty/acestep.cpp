@@ -361,50 +361,55 @@ static float * audio_planar_to_interleaved(const float * planar, int T) {
 static_assert(sizeof(float) == 4, "requires 32-bit float");
 static_assert(std::numeric_limits<float>::is_iec559, "requires IEEE-754 float");
 
-inline void wav_write_u16le(char *& p, std::uint16_t v) {
-    *p++ = (char) (v & 0xff);
-    *p++ = (char) ((v >> 8) & 0xff);
+inline void wav_write_u16le(char *& p, std::uint16_t x) {
+    *p++ = (char) (x & 0xff);
+    *p++ = (char) ((x >> 8) & 0xff);
 }
 
-inline void wav_write_u24le(char *& p, std::uint32_t v) {
-    *p++ = (char) (v & 0xff);
-    *p++ = (char) ((v >> 8) & 0xff);
-    *p++ = (char) ((v >> 16) & 0xff);
+inline void wav_write_u24le(char *& p, std::uint32_t x) {
+    *p++ = (char) (x & 0xff);
+    *p++ = (char) ((x >> 8) & 0xff);
+    *p++ = (char) ((x >> 16) & 0xff);
 }
 
-inline void wav_write_u32le(char *& p, std::uint32_t v) {
-    *p++ = (char) (v & 0xff);
-    *p++ = (char) ((v >> 8) & 0xff);
-    *p++ = (char) ((v >> 16) & 0xff);
-    *p++ = (char) ((v >> 24) & 0xff);
+inline void wav_write_u32le(char *& p, std::uint32_t x) {
+    *p++ = (char) (x & 0xff);
+    *p++ = (char) ((x >> 8) & 0xff);
+    *p++ = (char) ((x >> 16) & 0xff);
+    *p++ = (char) ((x >> 24) & 0xff);
 }
 
-inline void wav_write_f32le(char *& p, float v) {
-    std::uint32_t u;
-    std::memcpy(&u, &v, 4);
-    wav_write_u32le(p, u);
+inline float wav_sanitize(float x) {
+    return std::isfinite(x) ? x : 0.0f;
 }
 
+inline void wav_write_f32le(char *& p, float x) {
+    x = wav_sanitize(x);
+    std::uint32_t o;
+    std::memcpy(&o, &x, 4);
+    wav_write_u32le(p, o);
+}
+ 
 inline float wav_clamp1(float x) {
     return x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
 }
 
 inline std::int16_t wav_quantize_s16(float x) {
-    x = wav_clamp1(x);
+    x = wav_clamp1(wav_sanitize(x));
     return (std::int16_t) (x * 32767.0f);
 }
 
 inline std::int32_t wav_quantize_s24(float x) {
-    x = wav_clamp1(x);
+    x = wav_clamp1(wav_sanitize(x));
     return (std::int32_t) (x * 8388607.0f);
 }
 
-inline void wav_write_s16le(char *& p, std::int16_t v) {
-    wav_write_u16le(p, (std::uint16_t) v);
+inline void wav_write_s16le(char *& p, std::int16_t x) {
+    wav_write_u16le(p, (std::uint16_t) x);
 }
 
-inline void wav_write_s24le(char *& p, std::int32_t v) {
-    wav_write_u24le(p, (std::uint32_t) v);
+inline void wav_write_s24le(char *& p, std::int32_t x) {
+    wav_write_u24le(p, (std::uint32_t) x);
 }
 
 inline void wav_write_guid_pcm(char *& p) {
