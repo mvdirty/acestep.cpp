@@ -588,7 +588,7 @@ enum WavFormat {
     WAV_FORMAT_IEEE_F32,
 };
 
-bool parse_optional_wav_format(const char* s, WavFormat& out) {
+static bool parse_optional_wav_format(const char* s, WavFormat& out) {
     if (!s) {
         return true;
     }
@@ -608,7 +608,7 @@ bool parse_optional_wav_format(const char* s, WavFormat& out) {
     return true;
 }
 
-bool should_normalize_wav_audio(WavFormat wav_format) {
+inline bool should_normalize_wav_audio(WavFormat wav_format) {
     switch (wav_format) {
         case WAV_FORMAT_PCM_S16:
             return true;
