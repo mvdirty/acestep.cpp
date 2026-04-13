@@ -45,6 +45,7 @@ int main(int argc, char ** argv) {
                 "  -o <path>          Output file (WAV or MP3)\n"
                 "  -b <kbps>          Bitrate for MP3 encoding (default: 128)\n"
                 "  --wav-format <fmt> WAV audio format (default: pcm16)\n"
+                "                       Requires use of -o with a .wav extension\n"
                 "                       Supported values: pcm16, pcm24, and fp32\n"
                 "\n"
                 "Mode is auto-detected from output extension.\n"

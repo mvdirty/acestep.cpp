@@ -33,6 +33,7 @@ static void usage(const char * prog) {
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
             "  --wav                   Output WAV instead of MP3\n\n"
             "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "                            Requires use of --wav\n"
             "                            Supported values: pcm16, pcm24, and fp32\n"
             "                            (fp32 disables .wav normalization & peak clip)\n"
             "Memory control:\n"

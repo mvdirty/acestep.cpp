@@ -317,6 +317,7 @@ static void print_usage(const char * prog) {
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n\n"
             "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "                            Requires use of --decode\n"
             "                            Supported values: pcm16, pcm24, and fp32\n"
             "                            (fp32 disables .wav normalization & peak clip)\n"
             "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"

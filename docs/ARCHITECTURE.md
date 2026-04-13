@@ -714,6 +714,7 @@ Output:
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
   --wav                   Output WAV instead of MP3
   --wav-format <fmt>      WAV audio format (default: pcm16)
+                            Requires use of --wav
                             Supported values: pcm16, pcm24, and fp32
                             (fp32 disables .wav normalization & peak clip)
 
@@ -930,6 +931,7 @@ Output:
   --q8                    Quantize latent to int8 (~13 kbit/s)
   --q4                    Quantize latent to int4 (~6.8 kbit/s)
   --wav-format <fmt>      WAV audio format (default: pcm16)
+                            Requires use of --decode
                             Supported values: pcm16, pcm24, and fp32
                             (fp32 disables .wav normalization & peak clip)
 
@@ -992,6 +994,7 @@ Usage: mp3-codec -i <input> -o <o> [options]
   -o <path>          Output file (WAV or MP3)
   -b <kbps>          Bitrate for MP3 encoding (default: 128)
   --wav-format <fmt> WAV audio format (default: pcm16)
+                       Requires use of -o with a .wav extension
                        Supported values: pcm16, pcm24, and fp32
 
 Mode is auto-detected from output extension.
