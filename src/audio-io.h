@@ -362,6 +362,31 @@ enum WavFormat {
     WAV_F32,  // 32-bit IEEE 754 float (classic RIFF, fmt_tag=3)
 };
 
+// Parse --format value into container type and WAV subformat.
+// Accepts: mp3, wav, wav16, wav24, wav32. Returns false on unknown format.
+static bool audio_parse_format(const char * s, bool & is_mp3, WavFormat & wav_fmt) {
+    if (!s || !strcmp(s, "mp3")) {
+        is_mp3 = true;
+        return true;
+    }
+    if (!strcmp(s, "wav16")) {
+        is_mp3  = false;
+        wav_fmt = WAV_S16;
+        return true;
+    }
+    if (!strcmp(s, "wav24")) {
+        is_mp3  = false;
+        wav_fmt = WAV_S24;
+        return true;
+    }
+    if (!strcmp(s, "wav32")) {
+        is_mp3  = false;
+        wav_fmt = WAV_F32;
+        return true;
+    }
+    return false;
+}
+
 // Byte-level write helpers (endian-safe)
 
 static void wav_write_u16le(char *& p, uint16_t x) {
@@ -463,7 +488,9 @@ static void wav_write_header_extensible_s24(char *& p, int T_audio, int sr, int 
     wav_write_u32le(p, data_size);
 }
 
-// Encode planar stereo to WAV 16-bit signed integer PCM
+// Encode planar stereo to WAV 16-bit signed integer PCM in memory.
+// 44-byte classic RIFF header (fmt_tag=1) + interleaved int16 samples.
+// Clamps to [-1, +1], coerces NaN/Inf to zero.
 static std::string audio_encode_wav_s16(const float * audio, int T_audio, int sr) {
     int n_channels = 2;
     int data_size  = T_audio * n_channels * 2;
@@ -487,7 +514,9 @@ static std::string audio_encode_wav_s16(const float * audio, int T_audio, int sr
     return out;
 }
 
-// Encode planar stereo to WAV 24-bit signed integer PCM (WAVE_FORMAT_EXTENSIBLE)
+// Encode planar stereo to WAV 24-bit signed integer PCM in memory.
+// 68-byte WAVE_FORMAT_EXTENSIBLE header + interleaved int24 samples.
+// Clamps to [-1, +1], coerces NaN/Inf to zero.
 static std::string audio_encode_wav_s24(const float * audio, int T_audio, int sr) {
     int n_channels = 2;
     int data_size  = T_audio * n_channels * 3;
@@ -511,7 +540,9 @@ static std::string audio_encode_wav_s24(const float * audio, int T_audio, int sr
     return out;
 }
 
-// Encode planar stereo to WAV 32-bit IEEE 754 float
+// Encode planar stereo to WAV 32-bit IEEE 754 float in memory.
+// 44-byte classic RIFF header (fmt_tag=3) + interleaved float32 samples.
+// Coerces NaN/Inf to zero. No clamping: output may exceed [-1, +1].
 static std::string audio_encode_wav_f32(const float * audio, int T_audio, int sr) {
     int n_channels = 2;
     int data_size  = T_audio * n_channels * 4;
@@ -538,7 +569,7 @@ static std::string audio_encode_wav_f32(const float * audio, int T_audio, int sr
     return out;
 }
 
-// Encode planar stereo to WAV in the requested format.
+// Encode planar stereo to WAV in memory in the requested format.
 // audio is planar [L0..LN, R0..RN], pre-normalized by caller.
 // Does NOT normalize: caller is responsible (audio_write does it).
 // NaN and Inf are coerced to zero. S16/S24 clamp to [-1, +1].

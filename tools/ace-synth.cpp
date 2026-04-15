@@ -30,8 +30,8 @@ static void usage(const char * prog) {
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
             "Output:\n"
             "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
-            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
-            "  --wav                   Output WAV instead of MP3\n\n"
+            "  --format <fmt>          Output format: mp3, wav16, wav24, wav32 (default: mp3)\n"
+            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -63,7 +63,8 @@ int main(int argc, char ** argv) {
     bool                      clamp_fp16     = false;
     int                       vae_chunk      = 256;
     int                       vae_overlap    = 64;
-    bool                      output_wav     = false;  // default MP3, --wav forces WAV
+    bool                      is_mp3         = true;
+    WavFormat                 wav_fmt        = WAV_S16;
     int                       mp3_kbps       = 128;
 
     for (int i = 1; i < argc; i++) {
@@ -98,8 +99,12 @@ int main(int argc, char ** argv) {
             vae_chunk = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vae-overlap") && i + 1 < argc) {
             vae_overlap = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--wav")) {
-            output_wav = true;
+        } else if (!strcmp(argv[i], "--format") && i + 1 < argc) {
+            if (!audio_parse_format(argv[++i], is_mp3, wav_fmt)) {
+                fprintf(stderr, "Unknown format: %s (expected: mp3, wav, wav16, wav24, wav32)\n", argv[i]);
+                usage(argv[0]);
+                return 1;
+            }
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -284,10 +289,10 @@ int main(int argc, char ** argv) {
         if (!all_audio[b].samples) {
             continue;
         }
-        const char * ext = output_wav ? ".wav" : ".mp3";
+        const char * ext = is_mp3 ? ".mp3" : ".wav";
         char         out_path[1024];
         snprintf(out_path, sizeof(out_path), "%s%d%s", all_basenames[b].c_str(), all_synth_indices[b], ext);
-        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps)) {
+        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps, wav_fmt)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
         }
         ace_audio_free(&all_audio[b]);
