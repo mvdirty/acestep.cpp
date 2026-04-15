@@ -802,12 +802,6 @@ Memory control:
 
 Output:
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-  --wav-format <fmt>      WAV audio format (default: wav16)
-                            Supported values: wav, wav16, wav24, wav32
-                              wav/wav16: 16-bit signed-integer PCM audio
-                              wav24: 24-bit signed-integer PCM audio
-                              wav32: 32-bit IEEE floating-point PCM audio
-                                (wav32 disables normalization & peak clip)
 
 Server:
   --host <addr>           Listen address (default: 127.0.0.1)
