@@ -654,7 +654,7 @@ inline AudioFileFormat convert_wav_format_to_audio_file_format(WavFormat format)
     std::terminate();
 }
 
-static bool parse_audio_file_format(const char* s, AudioFileFormat& out) {
+static bool parse_optional_audio_file_format(const char* s, AudioFileFormat& out) {
     if (!s) {
         return false;
     }
@@ -989,15 +989,20 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
 // .mp3 -> MP3 encoding at the given kbps (default 128).
 // .wav (or anything else) -> WAV 16-bit PCM.
 // Normalizes in place before writing (single normalization point).
-static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps, WavFormat wav_format, int peak_clip = 10) {
+static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps, AudioFileFormat audio_file_format, int peak_clip = 10) {
     const bool write_mp3 = audio_io_ends_with(path, ".mp3");
 
-    if (write_mp3 || should_normalize_wav_audio(wav_format)) {
+    if (write_mp3 || should_normalize_audio(audio_file_format)) {
         audio_normalize(audio, T_audio * 2, peak_clip);
     }
 
     if (write_mp3) {
         return audio_write_mp3(path, audio, T_audio, sr, (kbps > 0) ? kbps : 128);
+    }
+
+    WavFormat wav_format = WAV_FORMAT_S16;
+    if (!convert_audio_file_format_to_wav_format(audio_file_format, wav_format)) {
+        // TODO Serveurperso - implement preferred conversion failure handling
     }
     return audio_write_wav(path, audio, T_audio, sr, wav_format);
 }

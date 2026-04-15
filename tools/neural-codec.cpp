@@ -319,9 +319,9 @@ static void print_usage(const char * prog) {
             "  --wav-format <fmt>      WAV audio format (default: wav16)\n"
             "                            Requires use of --decode\n"
             "                            Supported values: wav, wav16, wav24, wav32\n"
-            "                              wav/wav16: 16-bit signed-integer PCM audio\n"
-            "                              wav24: 24-bit signed-integer PCM audio\n"
-            "                              wav32: 32-bit IEEE floating-point PCM audio\n"
+            "                              wav/wav16: 16-bit signed-integer WAVE audio\n"
+            "                              wav24: 24-bit signed-integer WAVE audio\n"
+            "                              wav32: 32-bit IEEE floating-point WAVE audio\n"
             "                                (wav32 disables normalization & peak clip)\n\n"
             "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.latent -> song.wav\n\n"
@@ -494,7 +494,8 @@ int main(int argc, char ** argv) {
             return 1;
         }
 
-        if (audio_write(output_path, audio.data(), T_audio, 48000, 0, wav_format)) {
+        const AudioFileFormat audio_file_format = convert_wav_format_to_audio_file_format(wav_format);
+        if (audio_write(output_path, audio.data(), T_audio, 48000, 0, audio_file_format)) {
             fprintf(stderr, "\n[VAE] Output: %s (%d samples, %.2fs @ 48kHz)\n", output_path, T_audio,
                     (float) T_audio / 48000.0f);
         } else {

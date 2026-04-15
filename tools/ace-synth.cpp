@@ -30,15 +30,16 @@ static void usage(const char * prog) {
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
             "Output:\n"
             "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
+            "  --output <format>       Output audio file format (default: mp3)\n"
+            "                            Supported values: mp3, wav, wav16, wav24, wav32\n"
+            "                              mp3: MPEG-1 Audio Layer III encoded audio\n"
+            "                              wav/wav16: 16-bit signed-integer WAVE audio\n"
+            "                              wav24: 24-bit signed-integer WAVE audio\n"
+            "                              wav32: 32-bit IEEE floating-point WAVE audio\n"
+            "                                (wav32 disables normalization & peak clip)\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
-            "  --wav                   Output WAV instead of MP3\n\n"
-            "  --wav-format <fmt>      WAV audio format (default: wav16)\n"
-            "                            Requires use of --wav\n"
-            "                            Supported values: wav, wav16, wav24, wav32\n"
-            "                              wav/wav16: 16-bit signed-integer PCM audio\n"
-            "                              wav24: 24-bit signed-integer PCM audio\n"
-            "                              wav32: 32-bit IEEE floating-point PCM audio\n"
-            "                                (wav32 disables normalization & peak clip)\n\n"
+            "  --wav                   Alias of --output wav\n"
+            "\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -57,23 +58,22 @@ int main(int argc, char ** argv) {
     }
 
     std::vector<const char *> request_paths;
-    const char *              text_enc_gguf  = NULL;
-    const char *              dit_gguf       = NULL;
-    const char *              vae_gguf       = NULL;
-    const char *              src_audio_path = NULL;
-    const char *              ref_audio_path = NULL;
-    const char *              dump_dir       = NULL;
-    const char *              lora_path      = NULL;
-    float                     lora_scale     = 1.0f;
-    bool                      use_fa         = true;
-    bool                      use_batch_cfg  = true;
-    bool                      clamp_fp16     = false;
-    int                       vae_chunk      = 256;
-    int                       vae_overlap    = 64;
-    bool                      output_wav     = false;  // default MP3, --wav forces WAV
-    const char *              wav_format_str = nullptr;
-    WavFormat                 wav_format     = WAV_FORMAT_S16;
-    int                       mp3_kbps       = 128;
+    const char *              text_enc_gguf         = NULL;
+    const char *              dit_gguf              = NULL;
+    const char *              vae_gguf              = NULL;
+    const char *              src_audio_path        = NULL;
+    const char *              ref_audio_path        = NULL;
+    const char *              dump_dir              = NULL;
+    const char *              lora_path             = NULL;
+    float                     lora_scale            = 1.0f;
+    bool                      use_fa                = true;
+    bool                      use_batch_cfg         = true;
+    bool                      clamp_fp16            = false;
+    int                       vae_chunk             = 256;
+    int                       vae_overlap           = 64;
+    const char *              audio_file_format_str = nullptr;
+    AudioFileFormat           audio_file_format     = AUDIO_FILE_FORMAT_MP3;
+    int                       mp3_kbps              = 128;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--request")) {
@@ -107,10 +107,10 @@ int main(int argc, char ** argv) {
             vae_chunk = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vae-overlap") && i + 1 < argc) {
             vae_overlap = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--output") && i + 1 < argc) {
+            audio_file_format_str = argv[++i];
         } else if (!strcmp(argv[i], "--wav")) {
-            output_wav = true;
-        } else if (!strcmp(argv[i], "--wav-format") && i + 1 < argc) {
-            wav_format_str = argv[++i];
+            audio_file_format = AUDIO_FILE_FORMAT_WAV_S16;
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -138,13 +138,8 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
-    if (!output_wav && wav_format_str != nullptr) {
-        fprintf(stderr, "[CLI] ERROR: --wav-format requires usage of --wav\n");
-        usage(argv[0]);
-        return 1;
-    }
-    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
-        fprintf(stderr, "[CLI] ERROR: --wav-format requires a supported value\n");
+    if (!parse_optional_audio_file_format(audio_file_format_str, audio_file_format)) {
+        fprintf(stderr, "[CLI] ERROR: --output requires a supported value\n");
         usage(argv[0]);
         return 1;
     }
@@ -305,10 +300,11 @@ int main(int argc, char ** argv) {
         if (!all_audio[b].samples) {
             continue;
         }
-        const char * ext = output_wav ? ".wav" : ".mp3";
+        const AudioFileKind audio_file_kind = convert_audio_file_format_to_kind(audio_file_format);
+        const char * ext = audio_file_kind == AUDIO_FILE_KIND_WAV ? ".wav" : ".mp3";
         char         out_path[1024];
         snprintf(out_path, sizeof(out_path), "%s%d%s", all_basenames[b].c_str(), all_synth_indices[b], ext);
-        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps, wav_format)) {
+        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps, audio_file_format)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
         }
         ace_audio_free(&all_audio[b]);

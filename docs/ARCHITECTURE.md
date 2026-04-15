@@ -342,7 +342,7 @@ EOF
     --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-base-Q8_0.gguf \
     --vae models/vae-BF16.gguf \
-    --wav
+    --output wav
 ```
 
 Available track names for lego, extract, and complete: `vocals`, `backing_vocals`,
@@ -711,15 +711,15 @@ LoRA:
 
 Output:
   Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...
-  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-  --wav                   Output WAV instead of MP3
-  --wav-format <fmt>      WAV audio format (default: wav16)
-                            Requires use of --wav
-                            Supported values: wav, wav16, wav24, wav32
-                              wav/wav16: 16-bit signed-integer PCM audio
-                              wav24: 24-bit signed-integer PCM audio
-                              wav32: 32-bit IEEE floating-point PCM audio
+  --output <format>       Output audio file format (default: mp3)
+                            Supported values: mp3, wav, wav16, wav24, wav32
+                              mp3: MPEG-1 Audio Layer III encoded audio
+                              wav/wav16: 16-bit signed-integer WAVE audio
+                              wav24: 24-bit signed-integer WAVE audio
+                              wav32: 32-bit IEEE floating-point WAVE audio
                                 (wav32 disables normalization & peak clip)
+  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
+  --wav                   Alias of --output wav
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 256)
@@ -933,9 +933,9 @@ Output:
   --wav-format <fmt>      WAV audio format (default: wav16)
                             Requires use of --decode
                             Supported values: wav, wav16, wav24, wav32
-                              wav/wav16: 16-bit signed-integer PCM audio
-                              wav24: 24-bit signed-integer PCM audio
-                              wav32: 32-bit IEEE floating-point PCM audio
+                              wav/wav16: 16-bit signed-integer WAVE audio
+                              wav24: 24-bit signed-integer WAVE audio
+                              wav32: 32-bit IEEE floating-point WAVE audio
                                 (wav32 disables normalization & peak clip)
 
 Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)
@@ -999,9 +999,9 @@ Usage: mp3-codec -i <input> -o <o> [options]
   --wav-format <fmt> WAV audio format (default: wav16)
                        Requires use of -o with a .wav extension
                        Supported values: wav, wav16, wav24, wav32
-                         wav/wav16: 16-bit signed-integer PCM audio
-                         wav24: 24-bit signed-integer PCM audio
-                         wav32: 32-bit IEEE floating-point PCM audio
+                         wav/wav16: 16-bit signed-integer WAVE audio
+                         wav24: 24-bit signed-integer WAVE audio
+                         wav32: 32-bit IEEE floating-point WAVE audio
                            (wav32 disables normalization & peak clip)
 
 Mode is auto-detected from output extension.
