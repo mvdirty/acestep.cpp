@@ -91,7 +91,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[MP3-Codec] ERROR: --wav-format requires .wav output file\n");
         return 1;
     }
-    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
+    if (!parse_wav_format(wav_format_str, wav_format)) {
         fprintf(stderr, "[MP3-Codec] ERROR: --wav-format requires a supported value\n");
         return 1;
     }

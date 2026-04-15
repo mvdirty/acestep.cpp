@@ -399,7 +399,7 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 1;
     }
-    if (!parse_optional_wav_format(wav_format_str, wav_format)) {
+    if (!parse_wav_format(wav_format_str, wav_format)) {
         fprintf(stderr, "[CLI] ERROR: --wav-format requires a supported value\n");
         print_usage(argv[0]);
         return 1;

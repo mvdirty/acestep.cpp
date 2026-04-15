@@ -605,8 +605,8 @@ enum WavFormat {
     WAV_FORMAT_IEEE_F32,
 };
 
-inline AudioFileKind convert_audio_file_format_to_kind(AudioFileFormat format) {
-    switch (format) {
+inline AudioFileKind convert_audio_file_format_to_kind(AudioFileFormat audio_file_format) {
+    switch (audio_file_format) {
         case AUDIO_FILE_FORMAT_MP3:
             return AUDIO_FILE_KIND_MP3;
         case AUDIO_FILE_FORMAT_WAV_S16:
@@ -621,8 +621,8 @@ inline AudioFileKind convert_audio_file_format_to_kind(AudioFileFormat format) {
     std::terminate();
 }
 
-inline bool convert_audio_file_format_to_wav_format(AudioFileFormat format, WavFormat& out) {
-    switch (format) {
+inline bool convert_audio_file_format_to_wav_format(AudioFileFormat audio_file_format, WavFormat& out) {
+    switch (audio_file_format) {
         case AUDIO_FILE_FORMAT_MP3:
             return false;
         case AUDIO_FILE_FORMAT_WAV_S16:
@@ -640,8 +640,8 @@ inline bool convert_audio_file_format_to_wav_format(AudioFileFormat format, WavF
     std::terminate();
 }
 
-inline AudioFileFormat convert_wav_format_to_audio_file_format(WavFormat format) {
-    switch (format) {
+inline AudioFileFormat convert_wav_format_to_audio_file_format(WavFormat wav_format) {
+    switch (wav_format) {
         case WAV_FORMAT_S16:
             return AUDIO_FILE_FORMAT_WAV_S16;
         case WAV_FORMAT_S24:
@@ -654,7 +654,7 @@ inline AudioFileFormat convert_wav_format_to_audio_file_format(WavFormat format)
     std::terminate();
 }
 
-static bool parse_optional_audio_file_format(const char* s, AudioFileFormat& out) {
+static bool parse_audio_file_format(const char* s, AudioFileFormat& out) {
     if (!s) {
         return false;
     }
@@ -678,7 +678,7 @@ static bool parse_optional_audio_file_format(const char* s, AudioFileFormat& out
     return true;
 }
 
-static bool parse_optional_wav_format(const char* s, WavFormat& out) {
+static bool parse_wav_format(const char* s, WavFormat& out) {
     if (!s) {
         return true;
     }
@@ -700,8 +700,8 @@ static bool parse_optional_wav_format(const char* s, WavFormat& out) {
     return true;
 }
 
-inline bool should_normalize_audio(AudioFileFormat format) {
-    switch (format) {
+inline bool should_normalize_audio(AudioFileFormat audio_file_format) {
+    switch (audio_file_format) {
         case AUDIO_FILE_FORMAT_MP3:
             return true;
         case AUDIO_FILE_FORMAT_WAV_S16:
@@ -716,28 +716,15 @@ inline bool should_normalize_audio(AudioFileFormat format) {
     std::terminate();
 }
 
-inline bool should_normalize_wav_audio(WavFormat format) {
-    switch (format) {
-        case WAV_FORMAT_S16:
-            return true;
-        case WAV_FORMAT_S24:
-            return true;
-        case WAV_FORMAT_IEEE_F32:
-            return false;
-    }
-
-    assert(false && "unsupported WavFormat");
-    std::terminate();
-}
-
-// audio_encode_wav is the core: encode planar stereo to WAV 16-bit PCM, 24-bit PCM, or 32-bit floating point in memory.
-// 16-bit PCM outputs classic RIFF header and little-endian integer samples.
-// 24-bit PCM outputs extensible header and little-endian integer samples.
+// audio_encode_wav is the core: encode planar stereo to WAV 16-bit signed-integer,
+//   24-bit signed-integer, or 32-bit floating point PCM in memory.
+// 16-bit outputs classic RIFF header and little-endian integer samples.
+// 24-bit outputs extensible header and little-endian integer samples.
 // 32-bit floating-point outputs classic RIFF header and little-endian IEEE-754 floating-point samples.
 // audio is planar [L0..LN, R0..RN], pre-normalized by caller.
 // Does NOT normalize - caller is responsible (audio_write does it).
 // NaN, -Inf, and +Inf are automatically coerced to zero.
-// 16-bit and 24-bit PCM output is automatically clamped to -1/+1 range.
+// 16-bit and 24-bit signed-integer output is automatically clamped to -1/+1 range.
 // 32-bit floating-point output may exceed -1/+1 range.
 // Returns empty string on failure.
 inline std::string audio_encode_wav(const float * audio, int T_audio, int sr, WavFormat wav_format) {
