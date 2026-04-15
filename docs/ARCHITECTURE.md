@@ -719,7 +719,6 @@ Output:
                               wav32: 32-bit IEEE floating-point WAVE audio
                                 (wav32 disables normalization & peak clip)
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-  --wav                   Alias of --output wav
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 256)

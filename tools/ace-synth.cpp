@@ -38,7 +38,6 @@ static void usage(const char * prog) {
             "                              wav32: 32-bit IEEE floating-point WAVE audio\n"
             "                                (wav32 disables normalization & peak clip)\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
-            "  --wav                   Alias of --output wav\n"
             "\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
@@ -109,8 +108,6 @@ int main(int argc, char ** argv) {
             vae_overlap = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--output") && i + 1 < argc) {
             audio_file_format_str = argv[++i];
-        } else if (!strcmp(argv[i], "--wav")) {
-            audio_file_format = AUDIO_FILE_FORMAT_WAV_S16;
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
