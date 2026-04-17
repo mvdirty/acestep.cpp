@@ -58,8 +58,8 @@ export const FIELDS: readonly FieldDef[] = [
 	{ key: 'track', section: 'routing', type: 'str' },
 	{ key: 'synth_model', section: 'routing', type: 'str' },
 	{ key: 'lm_model', section: 'routing', type: 'str' },
-	{ key: 'lora', section: 'routing', type: 'str' },
-	{ key: 'lora_scale', section: 'routing', type: 'num' }
+	{ key: 'adapter', section: 'routing', type: 'str' },
+	{ key: 'adapter_scale', section: 'routing', type: 'num' }
 ];
 
 // convert to number, undefined if empty/NaN
@@ -89,7 +89,7 @@ function resolveField(f: FieldDef, raw: unknown): unknown {
 }
 
 // serialize non-empty fields for JSON export.
-// caller injects srcRange (repainting_start/end) and validates lora.
+// caller injects srcRange (repainting_start/end) and validates adapter.
 export function buildSparse(r: AceRequest): AceRequest {
 	const out: AceRequest = { caption: String(r.caption || '') };
 	for (const f of FIELDS) {

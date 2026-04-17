@@ -34,8 +34,8 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->text_encoder_path = NULL;
     p->dit_path          = NULL;
     p->vae_path          = NULL;
-    p->lora_path         = NULL;
-    p->lora_scale        = 1.0f;
+    p->adapter_path      = NULL;
+    p->adapter_scale     = 1.0f;
     p->use_fa            = true;
     p->clamp_fp16        = false;
     p->use_batch_cfg     = true;
@@ -71,7 +71,7 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     fprintf(stderr, "[Synth-Load] Backend init: %.1f ms\n", timer.ms());
 
     timer.reset();
-    if (!dit_ggml_load(&ctx->dit, params->dit_path, params->lora_path, params->lora_scale)) {
+    if (!dit_ggml_load(&ctx->dit, params->dit_path, params->adapter_path, params->adapter_scale)) {
         fprintf(stderr, "[Synth-Load] FATAL: DiT load failed\n");
         delete ctx;
         return NULL;

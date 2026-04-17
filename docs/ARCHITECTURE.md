@@ -133,7 +133,7 @@ EOF
     --vae models/vae-BF16.gguf
 ```
 
-With a LoRA adapter (PEFT directory or ComfyUI single file):
+With an adapter (LoRA today, PEFT directory or ComfyUI single file):
 
 ```bash
 # PEFT directory (contains adapter_model.safetensors + adapter_config.json)
@@ -142,7 +142,7 @@ With a LoRA adapter (PEFT directory or ComfyUI single file):
     --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
     --vae models/vae-BF16.gguf \
-    --lora /path/to/lora-adapter
+    --adapter /path/to/peft-adapter
 
 # ComfyUI single .safetensors file (alpha baked in, no config needed)
 ./ace-synth \
@@ -150,7 +150,7 @@ With a LoRA adapter (PEFT directory or ComfyUI single file):
     --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
     --vae models/vae-BF16.gguf \
-    --lora best_sft_v2_2338_comfyui.safetensors
+    --adapter best_sft_v2_2338_comfyui.safetensors
 ```
 
 Generate multiple songs at once with `lm_batch_size` in the JSON:
@@ -459,8 +459,8 @@ the LLM fills them, or a sensible runtime default is applied.
     "infer_method":         "",
     "synth_model":          "",
     "lm_model":             "",
-    "lora":                 "",
-    "lora_scale":           1.0
+    "adapter":              "",
+    "adapter_scale":        1.0
 }
 ```
 
@@ -602,13 +602,14 @@ Empty string keeps the currently loaded DiT, or loads the first available one.
 LM model filename to use for /lm and /understand (e.g. `"acestep-5Hz-lm-4B-Q8_0.gguf"`).
 Empty string keeps the currently loaded LM, or loads the first available one.
 
-**`lora`** (string, default `""`)
-LoRA adapter name from the `--loras` directory (e.g. `"singer-v2.safetensors"`
-or `"my-peft-lora"`). Empty string means no LoRA. Changing the LoRA reloads
-the DiT (LoRA is merged into weights at load time).
+**`adapter`** (string, default `""`)
+Adapter name from the `--adapters` directory (e.g. `"singer-v2.safetensors"`
+or `"my-peft-adapter"`). Empty string means no adapter. Changing the adapter
+reloads the DiT (deltas are merged into weights at load time). Supported
+algorithm today: LoRA.
 
-**`lora_scale`** (float, default `1.0`)
-LoRA scaling factor. Only used when `lora` is set.
+**`adapter_scale`** (float, default `1.0`)
+Adapter scaling factor. Only used when `adapter` is set.
 
 ### LM sampling (ace-lm)
 
@@ -705,12 +706,11 @@ Audio:
   --src-audio <file>      Source audio (WAV or MP3)
   --ref-audio <file>      Timbre reference audio (WAV or MP3)
 
-LoRA:
-  --lora <path>           LoRA safetensors file or directory
-  --lora-scale <float>    LoRA scaling factor (default: 1.0)
+Adapter:
+  --adapter <path>        Adapter safetensors file or PEFT directory
+  --adapter-scale <float> Adapter scaling factor (default: 1.0)
 
 Output:
-  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...
   --format <fmt>          Output format: mp3, wav16, wav24, wav32 (default: mp3)
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
 
@@ -727,13 +727,13 @@ Debug:
 
 Models are loaded once and reused across all requests.
 
-When `--lora` is provided, LoRA deltas are merged into the DiT projection
-weights at load time (before QKV fusion and GPU upload). The safetensors
-file is parsed directly, each lora_A/lora_B pair is multiplied
+When `--adapter` is provided, deltas are merged into the DiT projection
+weights at load time (before QKV fusion and GPU upload). For LoRA, the
+safetensors file is parsed directly, each lora_A/lora_B pair is multiplied
 (`alpha/rank * scale * B @ A`), and the result is added to the base weight
 in F32 before requantizing back to the original GGUF type. This is a
 static merge: inference runs at full speed with no adapter overhead.
-`--lora` accepts either a safetensors file or a directory containing
+`--adapter` accepts either a safetensors file or a directory containing
 `adapter_model.safetensors` and `adapter_config.json` (PEFT format).
 
 `--src-audio` provides source content for cover, repaint, lego, extract and
@@ -785,8 +785,8 @@ Usage: ace-server --models <dir> [options]
 Required:
   --models <dir>          Directory of GGUF model files
 
-LoRA:
-  --loras <dir>           Directory of LoRA adapters
+Adapter:
+  --adapters <dir>        Directory of adapters
 
 Memory control:
   --keep-loaded           Keep models in VRAM between requests
@@ -815,8 +815,8 @@ Examples:
 # all models in one directory
 ./ace-server --models /path/to/models
 
-# with LoRA adapters
-./ace-server --models /path/to/models --loras /path/to/loras
+# with adapters
+./ace-server --models /path/to/models --adapters /path/to/adapters
 
 # custom port and batch limit
 ./ace-server --models /path/to/models --host 0.0.0.0 --port 8085 --max-batch 2
@@ -865,8 +865,8 @@ GET  /logs                      SSE stream of server stderr
 GET  /                          Embedded WebUI (gzipped HTML)
 ```
 
-`lm_model`, `synth_model`, `lora`, `lora_scale` fields in the JSON body
-select which model and LoRA to load. `synth_batch_size` duplicates a
+`lm_model`, `synth_model`, `adapter`, `adapter_scale` fields in the JSON body
+select which model and adapter to load. `synth_batch_size` duplicates a
 request for multiple DiT variations (clamped to 9). Error responses are
 JSON: `{"error":"message"}` with 400, 500, 501, or 503 status.
 
@@ -880,7 +880,7 @@ default AceRequest (source of truth for webui dropdowns and placeholders):
     "dit": ["acestep-v15-turbo-Q8_0.gguf", "acestep-v15-xl-turbo-Q8_0.gguf"],
     "vae": ["vae-BF16.gguf"]
   },
-  "loras": [],
+  "adapters": [],
   "cli": { "max_batch": 1, "mp3_bitrate": 128 },
   "default": { "caption": "", "duration": 0, ... }
 }
@@ -1049,7 +1049,7 @@ ace-synth
   Qwen3-Embedding (28L text encoder)
   CondEncoder (lyric 8L + timbre 4L + text_proj)
   FSQ detokenizer (audio codes -> flow matching source latents)
-  LoRA merge (optional: safetensors delta -> dequant/merge/requant at load)
+  Adapter merge (optional: LoRA safetensors delta -> dequant/merge/requant at load)
   DiT (2B: 24L H=2048, XL: 32L H=2560, flow matching ODE Euler or SDE Stochastic)
   VAE (AutoencoderOobleck, tiled decode)
   WAV stereo 48kHz

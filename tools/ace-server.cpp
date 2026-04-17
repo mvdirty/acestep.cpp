@@ -180,8 +180,8 @@ static ModelRegistry g_registry;
 // loaded model names (empty = nothing loaded)
 static std::string g_loaded_lm;
 static std::string g_loaded_dit;
-static std::string g_loaded_lora;
-static float       g_loaded_lora_scale = 1.0f;
+static std::string g_loaded_adapter;
+static float       g_loaded_adapter_scale = 1.0f;
 static std::string g_loaded_und_dit;
 
 // pipeline params (rebuilt from registry paths on each load)
@@ -442,15 +442,15 @@ static std::string resolve_name(const std::vector<ModelEntry> & bucket,
 struct ServerFields {
     std::string synth_model;
     std::string lm_model;
-    std::string lora;
-    float       lora_scale;
+    std::string adapter;
+    float       adapter_scale;
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
-    sf->synth_model = "";
-    sf->lm_model    = "";
-    sf->lora        = "";
-    sf->lora_scale  = 1.0f;
+    sf->synth_model   = "";
+    sf->lm_model      = "";
+    sf->adapter       = "";
+    sf->adapter_scale = 1.0f;
 
     yyjson_doc * doc = yyjson_read(json, strlen(json), 0);
     if (!doc) {
@@ -479,11 +479,11 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     if ((v = yyjson_obj_get(obj, "lm_model")) && yyjson_is_str(v)) {
         sf->lm_model = yyjson_get_str(v);
     }
-    if ((v = yyjson_obj_get(obj, "lora")) && yyjson_is_str(v)) {
-        sf->lora = yyjson_get_str(v);
+    if ((v = yyjson_obj_get(obj, "adapter")) && yyjson_is_str(v)) {
+        sf->adapter = yyjson_get_str(v);
     }
-    if ((v = yyjson_obj_get(obj, "lora_scale")) && yyjson_is_num(v)) {
-        sf->lora_scale = (float) yyjson_get_num(v);
+    if ((v = yyjson_obj_get(obj, "adapter_scale")) && yyjson_is_num(v)) {
+        sf->adapter_scale = (float) yyjson_get_num(v);
     }
 
     yyjson_doc_free(doc);
@@ -558,10 +558,11 @@ static bool ensure_understand(const std::string & lm_name, const std::string & d
     return true;
 }
 
-// load synth pipeline (DiT + LoRA + text-enc + VAE). frees previous context first.
+// load synth pipeline (DiT + adapter + text-enc + VAE). frees previous context first.
 // returns false on failure (caller returns 500).
-static bool ensure_synth(const std::string & dit_name, const std::string & lora_name, float lora_scale) {
-    if (g_ctx_synth && g_loaded_dit == dit_name && g_loaded_lora == lora_name && g_loaded_lora_scale == lora_scale) {
+static bool ensure_synth(const std::string & dit_name, const std::string & adapter_name, float adapter_scale) {
+    if (g_ctx_synth && g_loaded_dit == dit_name && g_loaded_adapter == adapter_name &&
+        g_loaded_adapter_scale == adapter_scale) {
         return true;
     }
 
@@ -586,35 +587,35 @@ static bool ensure_synth(const std::string & dit_name, const std::string & lora_
     g_synth_params.dit_path          = dit->path.c_str();
     g_synth_params.vae_path          = g_registry.vae[0].path.c_str();
 
-    // resolve lora
-    if (!lora_name.empty()) {
-        const LoraEntry * lora = registry_find_lora(g_registry, lora_name.c_str());
-        if (!lora) {
-            fprintf(stderr, "[Server] LoRA not found: %s\n", lora_name.c_str());
+    // resolve adapter
+    if (!adapter_name.empty()) {
+        const AdapterEntry * adapter = registry_find_adapter(g_registry, adapter_name.c_str());
+        if (!adapter) {
+            fprintf(stderr, "[Server] Adapter not found: %s\n", adapter_name.c_str());
             g_loaded_dit.clear();
-            g_loaded_lora.clear();
+            g_loaded_adapter.clear();
             return false;
         }
-        g_synth_params.lora_path  = lora->path.c_str();
-        g_synth_params.lora_scale = lora_scale;
+        g_synth_params.adapter_path  = adapter->path.c_str();
+        g_synth_params.adapter_scale = adapter_scale;
     } else {
-        g_synth_params.lora_path  = nullptr;
-        g_synth_params.lora_scale = 1.0f;
+        g_synth_params.adapter_path  = nullptr;
+        g_synth_params.adapter_scale = 1.0f;
     }
 
     fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
-            lora_name.empty() ? "" : " LoRA=", lora_name.c_str());
+            adapter_name.empty() ? "" : " Adapter=", adapter_name.c_str());
     g_ctx_synth = ace_synth_load(&g_synth_params);
     if (!g_ctx_synth) {
         fprintf(stderr, "[Server] FATAL: synth load failed\n");
         g_loaded_dit.clear();
-        g_loaded_lora.clear();
+        g_loaded_adapter.clear();
         return false;
     }
 
-    g_loaded_dit        = dit_name;
-    g_loaded_lora       = lora_name;
-    g_loaded_lora_scale = lora_scale;
+    g_loaded_dit           = dit_name;
+    g_loaded_adapter       = adapter_name;
+    g_loaded_adapter_scale = adapter_scale;
     return true;
 }
 
@@ -762,7 +763,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
 
     // load
     std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
-    if (!ensure_synth(dit_name, sf.lora, sf.lora_scale)) {
+    if (!ensure_synth(dit_name, sf.adapter, sf.adapter_scale)) {
         free(src_interleaved);
         free(ref_interleaved);
         job->status.store(2);
@@ -799,7 +800,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
                 ace_synth_free(g_ctx_synth);
                 g_ctx_synth = nullptr;
                 g_loaded_dit.clear();
-                g_loaded_lora.clear();
+                g_loaded_adapter.clear();
             }
             free(src_interleaved);
             free(ref_interleaved);
@@ -823,7 +824,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
         ace_synth_free(g_ctx_synth);
         g_ctx_synth = nullptr;
         g_loaded_dit.clear();
-        g_loaded_lora.clear();
+        g_loaded_adapter.clear();
     }
     free(src_interleaved);
     free(ref_interleaved);
@@ -1163,12 +1164,12 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     add_names(models, "dit", g_registry.dit);
     add_names(models, "vae", g_registry.vae);
 
-    // loras: available lora names
-    yyjson_mut_val * loras_arr = yyjson_mut_arr(doc);
-    for (const auto & e : g_registry.loras) {
-        yyjson_mut_arr_add_str(doc, loras_arr, e.name.c_str());
+    // adapters: available adapter names
+    yyjson_mut_val * adapters_arr = yyjson_mut_arr(doc);
+    for (const auto & e : g_registry.adapters) {
+        yyjson_mut_arr_add_str(doc, adapters_arr, e.name.c_str());
     }
-    yyjson_mut_obj_add_val(doc, root, "loras", loras_arr);
+    yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
 
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
@@ -1221,8 +1222,8 @@ static void usage(const char * prog) {
             "Required:\n"
             "  --models <dir>          Directory of GGUF model files\n"
             "\n"
-            "LoRA:\n"
-            "  --loras <dir>           Directory of LoRA adapters\n"
+            "Adapter:\n"
+            "  --adapters <dir>        Directory of adapters\n"
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
@@ -1250,10 +1251,10 @@ int main(int argc, char ** argv) {
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
 
-    const char * host       = "127.0.0.1";
-    int          port       = 8080;
-    const char * models_dir = nullptr;
-    const char * loras_dir  = nullptr;
+    const char * host         = "127.0.0.1";
+    int          port         = 8080;
+    const char * models_dir   = nullptr;
+    const char * adapters_dir = nullptr;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -1263,8 +1264,8 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--models") && i + 1 < argc) {
             models_dir = argv[++i];
-        } else if (!strcmp(argv[i], "--loras") && i + 1 < argc) {
-            loras_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
+            adapters_dir = argv[++i];
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             g_lm_params.max_seq = atoi(argv[++i]);
 
@@ -1328,10 +1329,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // scan loras directory (optional)
-    if (loras_dir) {
-        fprintf(stderr, "[Server] Scanning LoRAs in %s\n", loras_dir);
-        registry_scan_loras(&g_registry, loras_dir);
+    // scan adapters directory (optional)
+    if (adapters_dir) {
+        fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
+        registry_scan_adapters(&g_registry, adapters_dir);
     }
 
     // validate pipeline
@@ -1487,8 +1488,8 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[Server] Listening on %s:%d\n", host, port);
     fprintf(stderr, "[Server] Pipelines:%s%s%s\n", have_lm ? " /lm" : "", have_synth ? " /synth" : "",
             have_understand ? " /understand" : "");
-    fprintf(stderr, "[Server] Models: %zu LM, %zu Text-Enc, %zu DiT, %zu VAE, %zu LoRA\n", g_registry.lm.size(),
-            g_registry.text_enc.size(), g_registry.dit.size(), g_registry.vae.size(), g_registry.loras.size());
+    fprintf(stderr, "[Server] Models: %zu LM, %zu Text-Enc, %zu DiT, %zu VAE, %zu Adapter\n", g_registry.lm.size(),
+            g_registry.text_enc.size(), g_registry.dit.size(), g_registry.vae.size(), g_registry.adapters.size());
     if (!svr.listen(host, port)) {
         fprintf(stderr, "[Server] FATAL: cannot bind %s:%d\n", host, port);
     }

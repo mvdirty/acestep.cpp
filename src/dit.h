@@ -8,11 +8,11 @@
 // ggml ops used: rms_norm, mul_mat, rope_ext, flash_attn_ext, swiglu_split,
 //                conv_transpose_1d, add, mul, scale, view, reshape, permute.
 
+#include "adapter-merge.h"
 #include "backend.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
-#include "lora-merge.h"
 #include "timer.h"
 
 #include <cstdio>
@@ -253,8 +253,8 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
 // Load full DiT model from GGUF
 static bool dit_ggml_load(DiTGGML *    m,
                           const char * gguf_path,
-                          const char * lora_path  = nullptr,
-                          float        lora_scale = 1.0f) {
+                          const char * adapter_path  = nullptr,
+                          float        adapter_scale = 1.0f) {
     GGUFModel gf;
     if (!gf_load(&gf, gguf_path)) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
@@ -407,15 +407,15 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->scalar_one              = ggml_new_tensor_1d(m->wctx.ctx, GGML_TYPE_F32, 1);
     m->wctx.pending.push_back({ m->scalar_one, &one_val, sizeof(float), 0 });
 
-    // Merge LoRA deltas into projection weights (before GPU upload and QKV fusion)
-    if (lora_path) {
-        Timer lora_timer;
-        if (!lora_merge(&m->wctx, gf, lora_path, lora_scale, m->backend)) {
-            fprintf(stderr, "[LoRA] FATAL: no tensors merged (model mismatch)\n");
+    // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
+    if (adapter_path) {
+        Timer adapter_timer;
+        if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
+            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
             gf_close(&gf);
             return false;
         }
-        fprintf(stderr, "[LoRA] Merge time: %.1f ms\n", lora_timer.ms());
+        fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
     }
 
     // Allocate backend buffer and copy weights

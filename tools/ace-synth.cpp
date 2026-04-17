@@ -25,11 +25,10 @@ static void usage(const char * prog) {
             "Audio:\n"
             "  --src-audio <file>      Source audio (WAV or MP3)\n"
             "  --ref-audio <file>      Timbre reference audio (WAV or MP3)\n\n"
-            "LoRA:\n"
-            "  --lora <path>           LoRA safetensors file or directory\n"
-            "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
+            "Adapter:\n"
+            "  --adapter <path>        Adapter safetensors file or PEFT directory\n"
+            "  --adapter-scale <float> Adapter scaling factor (default: 1.0)\n\n"
             "Output:\n"
-            "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
             "  --format <fmt>          Output format: mp3, wav16, wav24, wav32 (default: mp3)\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n\n"
             "Memory control:\n"
@@ -56,8 +55,8 @@ int main(int argc, char ** argv) {
     const char *              src_audio_path = NULL;
     const char *              ref_audio_path = NULL;
     const char *              dump_dir       = NULL;
-    const char *              lora_path      = NULL;
-    float                     lora_scale     = 1.0f;
+    const char *              adapter_path   = NULL;
+    float                     adapter_scale  = 1.0f;
     bool                      use_fa         = true;
     bool                      use_batch_cfg  = true;
     bool                      clamp_fp16     = false;
@@ -83,10 +82,10 @@ int main(int argc, char ** argv) {
             src_audio_path = argv[++i];
         } else if (!strcmp(argv[i], "--ref-audio") && i + 1 < argc) {
             ref_audio_path = argv[++i];
-        } else if (!strcmp(argv[i], "--lora") && i + 1 < argc) {
-            lora_path = argv[++i];
-        } else if (!strcmp(argv[i], "--lora-scale") && i + 1 < argc) {
-            lora_scale = (float) atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--adapter") && i + 1 < argc) {
+            adapter_path = argv[++i];
+        } else if (!strcmp(argv[i], "--adapter-scale") && i + 1 < argc) {
+            adapter_scale = (float) atof(argv[++i]);
         } else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
             dump_dir = argv[++i];
         } else if (!strcmp(argv[i], "--no-fa")) {
@@ -139,8 +138,8 @@ int main(int argc, char ** argv) {
     params.text_encoder_path = text_enc_gguf;
     params.dit_path          = dit_gguf;
     params.vae_path          = vae_gguf;
-    params.lora_path         = lora_path;
-    params.lora_scale        = lora_scale;
+    params.adapter_path      = adapter_path;
+    params.adapter_scale     = adapter_scale;
     params.use_fa            = use_fa;
     params.use_batch_cfg     = use_batch_cfg;
     params.clamp_fp16        = clamp_fp16;

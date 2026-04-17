@@ -71,17 +71,18 @@ write a caption, set lyrics and metadata, generate, play, and download tracks.
 Models are loaded on first request (zero GPU at startup) and swapped
 automatically when you pick a different one in the UI.
 
-## LoRA
+## Adapters
 
-Drop LoRA adapters in the `loras/` folder and restart the server.
-Supports PEFT directories and ComfyUI single `.safetensors` files.
-Select the active LoRA from the WebUI.
+Drop adapters in the `adapters/` folder and restart the server.
+Supports LoRA today in two flavours: PEFT directories (with
+`adapter_model.safetensors` + `adapter_config.json`) and ComfyUI single
+`.safetensors` files. Select the active adapter from the WebUI.
 
 ## Server options
 
 ```
 --models <dir>       Model directory (required)
---loras <dir>        LoRA adapters directory
+--adapters <dir>     Adapter directory (LoRA today, LoKr soon)
 --host <addr>        Listen address (default: 127.0.0.1)
 --port <N>           Listen port (default: 8080)
 --max-batch <N>      LM batch limit 1-9 (default: 1)

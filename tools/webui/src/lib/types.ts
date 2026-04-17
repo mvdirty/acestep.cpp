@@ -33,8 +33,8 @@ export interface AceRequest {
 	// server routing (not part of C++ AceRequest, parsed separately)
 	synth_model?: string;
 	lm_model?: string;
-	lora?: string;
-	lora_scale?: number;
+	adapter?: string;
+	adapter_scale?: number;
 }
 
 // GET /props response
@@ -46,7 +46,7 @@ export interface AceProps {
 		dit: string[];
 		vae: string[];
 	};
-	loras: string[];
+	adapters: string[];
 	cli: Record<string, string | number>;
 	default: AceRequest;
 	presets: {

@@ -1,7 +1,11 @@
 #pragma once
-// lora-merge.h: runtime LoRA merge into GGUF weights before QKV fusion
+// adapter-merge.h: runtime adapter merge into GGUF weights before QKV fusion.
 //
-// Merges (alpha / rank) * scale * B @ A deltas into base weights in place.
+// LoRA algorithm (low rank adaptation):
+//   delta = (alpha / rank) * scale * B @ A
+// applied to base weights in place. Other algorithms plug in as additional
+// code paths sharing the same pipeline.
+//
 // Called after individual GGUF projection tensors are loaded into WeightCtx
 // but BEFORE wctx_alloc uploads to GPU and BEFORE QKV fusion concatenation.
 //
@@ -37,7 +41,7 @@
 
 // Convert safetensors tensor data to F32 based on dtype string.
 // Handles "F32", "BF16", "F16". Returns false for unknown dtypes.
-static bool lora_to_f32(const void * src, float * dst, int64_t n, const std::string & dtype) {
+static bool adapter_to_f32(const void * src, float * dst, int64_t n, const std::string & dtype) {
     if (dtype == "F32") {
         memcpy(dst, src, (size_t) n * sizeof(float));
     } else if (dtype == "BF16") {
@@ -110,7 +114,7 @@ static bool lora_is_b(const std::string & key) {
 
 // Read adapter_config.json for alpha. Returns alpha or 0 if not found.
 // Rank is always read from the actual tensor shapes (more reliable).
-static int lora_read_alpha(const char * dir) {
+static int adapter_read_alpha(const char * dir) {
     std::string path = std::string(dir) + "/adapter_config.json";
 
     FILE * f = fopen(path.c_str(), "rb");
@@ -154,14 +158,14 @@ static int lora_read_alpha(const char * dir) {
     }
 
     if (alpha > 0) {
-        fprintf(stderr, "[LoRA] adapter_config.json: alpha=%d\n", alpha);
+        fprintf(stderr, "[Adapter] adapter_config.json: alpha=%d\n", alpha);
     }
     return alpha;
 }
 
 // Dequant a GGUF tensor buffer to F32 using ggml type traits.
 // Works for all types: F32, BF16, F16, Q4_K, Q8_0, etc.
-static void lora_dequant(const void * src, float * dst, int64_t nel, enum ggml_type type) {
+static void adapter_dequant(const void * src, float * dst, int64_t nel, enum ggml_type type) {
     if (type == GGML_TYPE_F32) {
         memcpy(dst, src, (size_t) nel * sizeof(float));
         return;
@@ -170,14 +174,14 @@ static void lora_dequant(const void * src, float * dst, int64_t nel, enum ggml_t
     if (traits->to_float) {
         traits->to_float(src, dst, nel);
     } else {
-        fprintf(stderr, "[LoRA] WARNING: no dequant for type %d, zeroing\n", type);
+        fprintf(stderr, "[Adapter] WARNING: no dequant for type %d, zeroing\n", type);
         memset(dst, 0, (size_t) nel * sizeof(float));
     }
 }
 
 // Requant F32 data back to original type. Writes into dst buffer.
 // Returns the number of bytes written.
-static size_t lora_requant(const float * src, void * dst, int64_t nel, int64_t n_per_row, enum ggml_type type) {
+static size_t adapter_requant(const float * src, void * dst, int64_t nel, int64_t n_per_row, enum ggml_type type) {
     if (type == GGML_TYPE_F32) {
         size_t nb = (size_t) nel * sizeof(float);
         memcpy(dst, src, nb);
@@ -201,13 +205,13 @@ static size_t lora_requant(const float * src, void * dst, int64_t nel, int64_t n
         return nb;
     }
 
-    fprintf(stderr, "[LoRA] WARNING: no requant for type %d\n", type);
+    fprintf(stderr, "[Adapter] WARNING: no requant for type %d\n", type);
     return 0;
 }
 
 // Round F32 data through BF16 in place to match PEFT's intermediate precision.
 // Processes in fixed chunks to avoid large stack allocations.
-static void lora_bf16_round(float * data, int64_t n) {
+static void adapter_bf16_round(float * data, int64_t n) {
     const int64_t chunk = 4096;
     ggml_bf16_t   tmp[4096];
     for (int64_t i = 0; i < n; i += chunk) {
@@ -226,14 +230,14 @@ static void lora_bf16_round(float * data, int64_t n) {
 // A is [rank, in_feat] row-major (safetensors convention).
 // B is [out_feat, rank] row-major.
 // Writes out_feat * in_feat floats into delta.
-static void lora_gemm(const float *  a,
-                      const float *  b,
-                      float *        delta,
-                      int64_t        out_feat,
-                      int64_t        rank,
-                      int64_t        in_feat,
-                      float          scaling,
-                      ggml_backend_t backend) {
+static void adapter_gemm(const float *  a,
+                         const float *  b,
+                         float *        delta,
+                         int64_t        out_feat,
+                         int64_t        rank,
+                         int64_t        in_feat,
+                         float          scaling,
+                         ggml_backend_t backend) {
     int64_t a_nel = rank * in_feat;
     int64_t b_nel = out_feat * rank;
     int64_t c_nel = out_feat * in_feat;
@@ -275,31 +279,31 @@ static void lora_gemm(const float *  a,
     ggml_free(ctx);
 }
 
-// Main LoRA merge function.
+// Main adapter merge entry point.
 //
 // Call after all GGUF tensors are loaded into wctx->pending but before wctx_alloc.
-// For each LoRA pair found in the safetensors file:
-//   1. Map PEFT key to GGUF tensor name
+// Handles LoRA adapters. For each LoRA pair found in the safetensors:
+//   1. Map PEFT or ComfyUI key to GGUF tensor name
 //   2. Find the matching PendingCopy via hashmap (O(1) lookup)
 //   3. Compute delta = (alpha/rank) * scale * B @ A via backend GEMM
 //   4. Round delta through BF16 to match PEFT intermediate precision
 //   5. Dequant base weight row by row, add to delta
 //   6. Requant into staging buffer, patch PendingCopy.src
 //
-// The lora_path can be a .safetensors file or a directory containing
+// The adapter_path can be a .safetensors file or a directory containing
 // adapter_model.safetensors and adapter_config.json.
-static bool lora_merge(WeightCtx *       wctx,
-                       const GGUFModel & gf,
-                       const char *      lora_path,
-                       float             scale,
-                       ggml_backend_t    backend) {
-    // resolve paths: if lora_path is a directory, look for adapter_model.safetensors
-    std::string sf_path = lora_path;
-    std::string dir     = lora_path;
+static bool adapter_merge(WeightCtx *       wctx,
+                          const GGUFModel & gf,
+                          const char *      adapter_path,
+                          float             scale,
+                          ggml_backend_t    backend) {
+    // resolve paths: if adapter_path is a directory, look for adapter_model.safetensors
+    std::string sf_path = adapter_path;
+    std::string dir     = adapter_path;
 
     struct stat sb;
-    if (stat(lora_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
-        sf_path = std::string(lora_path) + "/adapter_model.safetensors";
+    if (stat(adapter_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        sf_path = std::string(adapter_path) + "/adapter_model.safetensors";
     } else {
         size_t sep = dir.find_last_of("/\\");
         dir        = (sep != std::string::npos) ? dir.substr(0, sep) : ".";
@@ -312,7 +316,7 @@ static bool lora_merge(WeightCtx *       wctx,
     }
 
     // read alpha from adapter_config.json (0 means not found)
-    int alpha_cfg = lora_read_alpha(dir.c_str());
+    int alpha_cfg = adapter_read_alpha(dir.c_str());
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
     // also collect per-tensor alpha scalars (ComfyUI baked format).
@@ -364,7 +368,7 @@ static bool lora_merge(WeightCtx *       wctx,
         // find matching lora_B
         auto it = b_map.find(gguf_name);
         if (it == b_map.end()) {
-            fprintf(stderr, "[LoRA] WARNING: no lora_B for %s, skipping\n", gguf_name.c_str());
+            fprintf(stderr, "[Adapter] WARNING: no lora_B for %s, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
@@ -373,7 +377,7 @@ static bool lora_merge(WeightCtx *       wctx,
         // look up the GGUF tensor to get its type and shape
         int64_t tidx = gguf_find_tensor(gf.gguf, gguf_name.c_str());
         if (tidx < 0) {
-            fprintf(stderr, "[LoRA] WARNING: tensor %s not in GGUF, skipping\n", gguf_name.c_str());
+            fprintf(stderr, "[Adapter] WARNING: tensor %s not in GGUF, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
@@ -389,7 +393,7 @@ static bool lora_merge(WeightCtx *       wctx,
 
         auto pc_it = pending_idx.find(base_ptr);
         if (pc_it == pending_idx.end()) {
-            fprintf(stderr, "[LoRA] WARNING: no PendingCopy for %s, skipping\n", gguf_name.c_str());
+            fprintf(stderr, "[Adapter] WARNING: no PendingCopy for %s, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
@@ -404,13 +408,13 @@ static bool lora_merge(WeightCtx *       wctx,
 
         // sanity checks
         if (eb->shape[1] != rank) {
-            fprintf(stderr, "[LoRA] WARNING: rank mismatch A=%lld vs B=%lld for %s\n", (long long) rank,
+            fprintf(stderr, "[Adapter] WARNING: rank mismatch A=%lld vs B=%lld for %s\n", (long long) rank,
                     (long long) eb->shape[1], gguf_name.c_str());
             skipped++;
             continue;
         }
         if (in_feat != ne0 || out_feat != ne1) {
-            fprintf(stderr, "[LoRA] WARNING: shape mismatch for %s: LoRA [%lld,%lld] vs GGUF [%lld,%lld]\n",
+            fprintf(stderr, "[Adapter] WARNING: shape mismatch for %s: LoRA [%lld,%lld] vs GGUF [%lld,%lld]\n",
                     gguf_name.c_str(), (long long) out_feat, (long long) in_feat, (long long) ne1, (long long) ne0);
             skipped++;
             continue;
@@ -434,29 +438,29 @@ static bool lora_merge(WeightCtx *       wctx,
         std::vector<float> a_f32((size_t) a_nel);
         std::vector<float> b_f32((size_t) b_nel);
 
-        if (!lora_to_f32(st_data(st, *ea), a_f32.data(), a_nel, ea->dtype)) {
-            fprintf(stderr, "[LoRA] WARNING: unsupported dtype %s for lora_A\n", ea->dtype.c_str());
+        if (!adapter_to_f32(st_data(st, *ea), a_f32.data(), a_nel, ea->dtype)) {
+            fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for lora_A\n", ea->dtype.c_str());
             skipped++;
             continue;
         }
-        if (!lora_to_f32(st_data(st, *eb), b_f32.data(), b_nel, eb->dtype)) {
-            fprintf(stderr, "[LoRA] WARNING: unsupported dtype %s for lora_B\n", eb->dtype.c_str());
+        if (!adapter_to_f32(st_data(st, *eb), b_f32.data(), b_nel, eb->dtype)) {
+            fprintf(stderr, "[Adapter] WARNING: unsupported dtype %s for lora_B\n", eb->dtype.c_str());
             skipped++;
             continue;
         }
 
         // PEFT casts LoRA weights to BF16 before computing the delta.
         // We replicate this round trip so B @ A matches merge_and_unload exactly.
-        lora_bf16_round(a_f32.data(), a_nel);
-        lora_bf16_round(b_f32.data(), b_nel);
+        adapter_bf16_round(a_f32.data(), a_nel);
+        adapter_bf16_round(b_f32.data(), b_nel);
 
         // delta = scaling * B @ A via backend GEMM (cuBLAS on CUDA, SIMD on CPU)
         std::vector<float> delta((size_t) nel);
-        lora_gemm(a_f32.data(), b_f32.data(), delta.data(), out_feat, rank, in_feat, scaling, backend);
+        adapter_gemm(a_f32.data(), b_f32.data(), delta.data(), out_feat, rank, in_feat, scaling, backend);
 
         // round delta through BF16 to match PEFT's intermediate precision.
         // without this, the diffusion model diverges (extremely sensitive to weight values).
-        lora_bf16_round(delta.data(), nel);
+        adapter_bf16_round(delta.data(), nel);
 
         // add base weight row by row: dequant each row into a small scratch buffer,
         // accumulate into delta, then discard. Avoids a second full-size F32 allocation.
@@ -465,7 +469,7 @@ static bool lora_merge(WeightCtx *       wctx,
         for (int64_t i = 0; i < ne1; i++) {
             const void * row_src   = (const uint8_t *) base_ptr + i * row_bytes;
             float *      delta_row = delta.data() + i * ne0;
-            lora_dequant(row_src, row_buf.data(), ne0, ttype);
+            adapter_dequant(row_src, row_buf.data(), ne0, ttype);
             for (int64_t j = 0; j < ne0; j++) {
                 delta_row[j] += row_buf[j];
             }
@@ -478,7 +482,7 @@ static bool lora_merge(WeightCtx *       wctx,
         wctx->staging.emplace_back(n_floats);
         void * merged_buf = wctx->staging.back().data();
 
-        size_t merged_bytes = lora_requant(delta.data(), merged_buf, nel, ne0, ttype);
+        size_t merged_bytes = adapter_requant(delta.data(), merged_buf, nel, ne0, ttype);
         if (merged_bytes == 0) {
             skipped++;
             continue;
@@ -491,6 +495,6 @@ static bool lora_merge(WeightCtx *       wctx,
     }
 
     st_close(&st);
-    fprintf(stderr, "[LoRA] Merged %d pairs (skipped %d), scale=%.2f\n", merged, skipped, scale);
+    fprintf(stderr, "[Adapter] Merged %d pairs (skipped %d), scale=%.2f\n", merged, skipped, scale);
     return merged > 0;
 }

@@ -14,8 +14,8 @@ struct AceSynthParams {
     const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
     const char * dit_path;           // DiT GGUF (required)
     const char * vae_path;           // VAE GGUF (NULL = no audio decode, latent only)
-    const char * lora_path;          // LoRA adapter path (NULL = no lora)
-    float        lora_scale;         // 1.0
+    const char * adapter_path;       // adapter safetensors or directory (NULL to disable)
+    float        adapter_scale;      // user scale multiplier, 1.0 by default
     bool         use_fa;             // flash attention (default: true)
     bool         clamp_fp16;         // clamp hidden states to FP16 range (default: false)
     bool         use_batch_cfg;      // batch cond+uncond in one DiT forward (default: true)
