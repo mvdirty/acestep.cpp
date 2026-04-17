@@ -4,6 +4,7 @@
 #include "audio-io.h"
 #include "pipeline-synth.h"
 #include "request.h"
+#include "synth-batch-runner.h"
 #include "task-types.h"
 #include "version.h"
 
@@ -131,6 +132,11 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
+    if (!vae_gguf) {
+        fprintf(stderr, "[CLI] ERROR: --vae required\n");
+        usage(argv[0]);
+        return 1;
+    }
 
     // Load models
     AceSynthParams params;
@@ -156,11 +162,6 @@ int main(int argc, char ** argv) {
     float * src_interleaved = NULL;
     int     src_len         = 0;
     if (src_audio_path) {
-        if (!vae_gguf) {
-            fprintf(stderr, "[Ace-Synth] ERROR: --src-audio requires --vae\n");
-            ace_synth_free(ctx);
-            return 1;
-        }
         int     T_audio = 0;
         float * planar  = audio_read_48k(src_audio_path, &T_audio);
         if (!planar) {
@@ -179,13 +180,6 @@ int main(int argc, char ** argv) {
     float * ref_interleaved = NULL;
     int     ref_len         = 0;
     if (ref_audio_path) {
-        if (!vae_gguf) {
-            fprintf(stderr, "[Ace-Synth] ERROR: --ref-audio requires --vae\n");
-            free(src_interleaved);
-            free(ref_interleaved);
-            ace_synth_free(ctx);
-            return 1;
-        }
         int     T_audio = 0;
         float * planar  = audio_read_48k(ref_audio_path, &T_audio);
         if (!planar) {
@@ -232,33 +226,19 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "[Ace-Synth] Batch: %d request(s)\n", batch_n);
 
-    // Expand synth_batch_size and process per-request groups in two phases.
-    // process each request as a separate group (same codes = same T per group).
-    // synth_batch_size variations within a group share the same T -> true GPU batch.
-    // different requests can have different T -> separate pipeline calls.
-    // Phase 1: DiT resident, iterate all groups -> jobs[] carry the latents.
-    // Phase 2: unload DiT, load VAE, iterate jobs[] with the largest tiles.
-    // This avoids reloading the DiT between groups and keeps VAE decoding tile
-    // size unconstrained by residual DiT VRAM.
+    // Build one group per original request (same codes = same T per group).
+    // synth_batch_size variations within a group share the same T, so they
+    // stack into a single GPU batch. Different requests can have different
+    // T -> they become separate groups and each gets its own DiT forward.
     int total_alloc = 0;
     for (int ri = 0; ri < batch_n; ri++) {
         int sbs = reqs[ri].synth_batch_size;
         total_alloc += sbs < 1 ? 1 : (sbs > 9 ? 9 : sbs);
     }
-    std::vector<AceAudio>    all_audio(total_alloc);
-    std::vector<std::string> all_basenames(total_alloc);
-    std::vector<int>         all_synth_indices(total_alloc);
-
-    // Phase 1: DiT
-    std::vector<AceSynthJob *> jobs(batch_n, nullptr);
-    std::vector<int>           audio_off(batch_n, 0);
-
-    if (!ace_synth_dit_load(ctx)) {
-        ace_synth_free(ctx);
-        free(src_interleaved);
-        free(ref_interleaved);
-        return 1;
-    }
+    std::vector<AceAudio>                all_audio(total_alloc);
+    std::vector<std::string>             all_basenames(total_alloc);
+    std::vector<int>                     all_synth_indices(total_alloc);
+    std::vector<std::vector<AceRequest>> groups(batch_n);
 
     int off = 0;
     for (int ri = 0; ri < batch_n; ri++) {
@@ -266,36 +246,24 @@ int main(int argc, char ** argv) {
         if (sbs < 1) {
             sbs = 1;
         }
+        if (sbs > 9) {
+            sbs = 9;
+        }
 
         // resolve seed once per original request
         request_resolve_seed(&reqs[ri]);
-        long long base_seed = reqs[ri].seed;
+        const long long base_seed = reqs[ri].seed;
 
-        // build group: N copies with consecutive seeds
-        std::vector<AceRequest> group(sbs);
+        groups[ri].resize(sbs);
         for (int i = 0; i < sbs; i++) {
-            group[i]      = reqs[ri];
-            group[i].seed = base_seed + i;
+            groups[ri][i]      = reqs[ri];
+            groups[ri][i].seed = base_seed + i;
         }
 
         if (batch_n > 1 || sbs > 1) {
             fprintf(stderr, "[Ace-Synth] Group %d: %d track(s)\n", ri, sbs);
         }
 
-        jobs[ri] = ace_synth_job_run_dit(ctx, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs);
-        if (!jobs[ri]) {
-            fprintf(stderr, "[Ace-Synth] ERROR: DiT phase failed for group %d\n", ri);
-            for (int j = 0; j < ri; j++) {
-                ace_synth_job_free(jobs[j]);
-            }
-            ace_synth_dit_unload(ctx);
-            free(src_interleaved);
-            free(ref_interleaved);
-            ace_synth_free(ctx);
-            return 1;
-        }
-
-        audio_off[ri] = off;
         for (int i = 0; i < sbs; i++) {
             all_basenames[off + i]     = basenames[ri];
             all_synth_indices[off + i] = i;
@@ -303,40 +271,18 @@ int main(int argc, char ** argv) {
         off += sbs;
     }
 
-    // DiT out, VAE in. VAE sees the full VRAM budget for wider tiles.
-    ace_synth_dit_unload(ctx);
-    if (!ace_synth_vae_load(ctx)) {
-        fprintf(stderr, "[Ace-Synth] ERROR: VAE load failed\n");
-        for (int j = 0; j < batch_n; j++) {
-            ace_synth_job_free(jobs[j]);
+    // Two-phase run: DiT resident for all groups, then VAE for all jobs.
+    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, all_audio.data());
+    if (rc != 0) {
+        fprintf(stderr, "[Ace-Synth] ERROR: batch run failed\n");
+        for (auto & a : all_audio) {
+            ace_audio_free(&a);
         }
         free(src_interleaved);
         free(ref_interleaved);
         ace_synth_free(ctx);
         return 1;
     }
-
-    // Phase 2: VAE decode + splice for every job.
-    for (int ri = 0; ri < batch_n; ri++) {
-        int rc = ace_synth_job_run_vae(ctx, jobs[ri], src_interleaved, src_len, all_audio.data() + audio_off[ri]);
-        if (rc != 0) {
-            fprintf(stderr, "[Ace-Synth] ERROR: VAE phase failed for group %d\n", ri);
-            for (int j = 0; j < batch_n; j++) {
-                ace_synth_job_free(jobs[j]);
-            }
-            for (auto & a : all_audio) {
-                ace_audio_free(&a);
-            }
-            ace_synth_vae_unload(ctx);
-            free(src_interleaved);
-            free(ref_interleaved);
-            ace_synth_free(ctx);
-            return 1;
-        }
-        ace_synth_job_free(jobs[ri]);
-    }
-
-    ace_synth_vae_unload(ctx);
 
     // Write output files
     for (int b = 0; b < (int) all_audio.size(); b++) {

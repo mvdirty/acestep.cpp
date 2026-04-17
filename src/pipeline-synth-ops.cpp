@@ -1,24 +1,15 @@
-// pipeline-synth.cpp: ACE-Step synthesis pipeline implementation
+// pipeline-synth-ops.cpp: primitive operations of the synthesis pipeline
 //
-// Wraps DiT + TextEncoder + CondEncoder + VAE for audio generation.
+// Each op takes AceSynth (the pipeline context) and SynthState (the transient
+// job state). See pipeline-synth-ops.h for the per-op contract and
+// pipeline-synth-impl.h for the struct layouts.
 
 #include "pipeline-synth-ops.h"
 
-#include "bpe.h"
-#include "cond-enc.h"
-#include "debug.h"
 #include "dit-sampler.h"
-#include "dit.h"
-#include "fsq-detok.h"
-#include "fsq-tok.h"
-#include "gguf-weights.h"
 #include "philox.h"
-#include "pipeline-synth.h"
-#include "qwen3-enc.h"
-#include "request.h"
-#include "timer.h"
+#include "pipeline-synth-impl.h"
 #include "vae-enc.h"
-#include "vae.h"
 
 #include <cctype>
 #include <cstdio>
@@ -28,7 +19,6 @@
 #include <string>
 #include <vector>
 
-// static helpers
 static const int FRAMES_PER_SECOND = 25;
 
 static std::vector<int> parse_codes_string(const std::string & s) {
@@ -52,10 +42,8 @@ static std::vector<int> parse_codes_string(const std::string & s) {
     return codes;
 }
 
-#include "pipeline-synth-impl.h"
-
 // ops_encode_src
-int ops_encode_src(AceSynth * ctx, const float * src_audio, int src_len, SynthState & s) {
+int ops_encode_src(const AceSynth * ctx, const float * src_audio, int src_len, SynthState & s) {
     // Cover mode: load VAE encoder and encode source audio
     s.have_cover = false;
     s.T_cover    = 0;
@@ -115,7 +103,7 @@ void ops_fsq_roundtrip(AceSynth * ctx, SynthState & s) {
 }
 
 // ops_resolve_params
-int ops_resolve_params(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
+int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
     // Extract shared params from first request
     s.duration = s.rr.duration > 0 ? s.rr.duration : 30.0f;
 
@@ -183,7 +171,7 @@ void ops_build_schedule(SynthState & s) {
 }
 
 // ops_resolve_T
-int ops_resolve_T(AceSynth * ctx, SynthState & s) {
+int ops_resolve_T(const AceSynth * ctx, SynthState & s) {
     // s.T = number of 25Hz latent frames for DiT
     // Source tasks: from source audio. Codes: from code count. Else: from s.duration.
     if (s.use_source_context && s.have_cover) {
@@ -217,7 +205,7 @@ int ops_resolve_T(AceSynth * ctx, SynthState & s) {
 }
 
 // ops_encode_timbre
-void ops_encode_timbre(AceSynth * ctx, const float * ref_audio, int ref_len, SynthState & s) {
+void ops_encode_timbre(const AceSynth * ctx, const float * ref_audio, int ref_len, SynthState & s) {
     // Timbre features from ref_audio (independent of src_audio).
     // VAE-encode ref_audio and pass all frames to the timbre encoder.
     // NULL ref_audio = single silence frame (no timbre conditioning).
@@ -515,7 +503,7 @@ int ops_build_context(AceSynth * ctx, const AceRequest * reqs, int batch_n, Synt
 }
 
 // ops_build_context_silence
-void ops_build_context_silence(AceSynth * ctx, int batch_n, SynthState & s) {
+void ops_build_context_silence(const AceSynth * ctx, int batch_n, SynthState & s) {
     // Cover mode: build silence s.context for audio_cover_strength switching
     // When step >= s.cover_steps, DiT switches from cover s.context to silence s.context
     // Repaint/lego_region: mask handles region; s.context switch never applies
@@ -547,7 +535,7 @@ void ops_build_context_silence(AceSynth * ctx, int batch_n, SynthState & s) {
 }
 
 // ops_init_noise_and_repaint
-void ops_init_noise_and_repaint(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
+void ops_init_noise_and_repaint(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
     // Generate N s.noise samples (Philox4x32-10, matches torch.randn on CUDA with bf16).
     // Each batch item uses its own seed from the request.
     s.noise.resize(batch_n * s.Oc * s.T);
@@ -661,96 +649,84 @@ int ops_vae_decode_and_splice(AceSynth *    ctx,
                               int           src_len,
                               bool (*cancel)(void *),
                               void * cancel_data) {
-    // VAE Decode
-    if (!ctx->have_vae) {
-        for (int b = 0; b < batch_n; b++) {
+    int                T_latent    = s.T;
+    int                T_audio_max = T_latent * 1920;
+    std::vector<float> audio(2 * T_audio_max);
+
+    for (int b = 0; b < batch_n; b++) {
+        float * dit_out = s.output.data() + b * s.Oc * s.T;
+
+        s.timer.reset();
+        int T_audio = vae_ggml_decode_tiled(&ctx->vae, dit_out, T_latent, audio.data(), T_audio_max,
+                                            ctx->params.vae_chunk, ctx->params.vae_overlap, cancel, cancel_data);
+        if (T_audio < 0) {
+            // check if this was a cancellation or a real error
+            if (cancel && cancel(cancel_data)) {
+                fprintf(stderr, "[VAE-Decode Batch%d] Cancelled\n", b);
+                return -1;
+            }
+            fprintf(stderr, "[VAE-Decode Batch%d] ERROR: decode failed\n", b);
             out[b].samples     = NULL;
             out[b].n_samples   = 0;
             out[b].sample_rate = 48000;
+            continue;
         }
-        return 0;
-    }
+        fprintf(stderr, "[VAE-Decode Batch%d] Decode: %.1f ms\n", b, s.timer.ms());
 
-    {
-        int                T_latent    = s.T;
-        int                T_audio_max = T_latent * 1920;
-        std::vector<float> audio(2 * T_audio_max);
+        if (b == 0) {
+            debug_dump_2d(&s.dbg, "vae_audio", audio.data(), 2, T_audio);
+        }
 
-        for (int b = 0; b < batch_n; b++) {
-            float * dit_out = s.output.data() + b * s.Oc * s.T;
+        // Copy to s.output buffer
+        int n_total    = 2 * T_audio;
+        out[b].samples = (float *) malloc((size_t) n_total * sizeof(float));
+        memcpy(out[b].samples, audio.data(), (size_t) n_total * sizeof(float));
+        out[b].n_samples   = T_audio;
+        out[b].sample_rate = 48000;
 
-            s.timer.reset();
-            int T_audio = vae_ggml_decode_tiled(&ctx->vae, dit_out, T_latent, audio.data(), T_audio_max,
-                                                ctx->params.vae_chunk, ctx->params.vae_overlap, cancel, cancel_data);
-            if (T_audio < 0) {
-                // check if this was a cancellation or a real error
-                if (cancel && cancel(cancel_data)) {
-                    fprintf(stderr, "[VAE-Decode Batch%d] Cancelled\n", b);
-                    return -1;
-                }
-                fprintf(stderr, "[VAE-Decode Batch%d] ERROR: decode failed\n", b);
-                out[b].samples     = NULL;
-                out[b].n_samples   = 0;
-                out[b].sample_rate = 48000;
-                continue;
-            }
-            fprintf(stderr, "[VAE-Decode Batch%d] Decode: %.1f ms\n", b, s.timer.ms());
-
-            if (b == 0) {
-                debug_dump_2d(&s.dbg, "vae_audio", audio.data(), 2, T_audio);
-            }
-
-            // Copy to s.output buffer
-            int n_total    = 2 * T_audio;
-            out[b].samples = (float *) malloc((size_t) n_total * sizeof(float));
-            memcpy(out[b].samples, audio.data(), (size_t) n_total * sizeof(float));
-            out[b].n_samples   = T_audio;
-            out[b].sample_rate = 48000;
-
-            // Waveform splice: replace non-repaint regions with original source audio.
-            // Python: apply_repaint_waveform_splice (when mode != aggressive)
-            // mask[s] = 1.0 inside repaint region, 0.0 outside, linear ramp at edges.
-            // result = mask * pred + (1-mask) * src  [planar stereo: L:s.T, R:s.T]
-            bool have_repaint_region = s.is_repaint || s.is_lego_region;
-            if (have_repaint_region && src_audio) {  // always splice (non-aggressive)
-                int T_splice = out[b].n_samples < src_len ? out[b].n_samples : src_len;
-                int start_s  = (int) (s.rs * 48000.0f);
-                int end_s    = (int) (s.re * 48000.0f);
-                start_s      = start_s < 0 ? 0 : (start_s > T_splice ? T_splice : start_s);
-                end_s        = end_s < start_s ? start_s : (end_s > T_splice ? T_splice : end_s);
-                // skip splice if region covers everything
-                if (start_s > 0 || end_s < T_splice) {
-                    int cf_s       = (int) (s.repaint_wav_cf_sec * 48000.0f);
-                    int fade_start = start_s - cf_s > 0 ? start_s - cf_s : 0;
-                    int fade_end   = end_s + cf_s < T_splice ? end_s + cf_s : T_splice;
-                    for (int ch = 0; ch < 2; ch++) {
-                        float * pred = out[b].samples + (size_t) ch * out[b].n_samples;
-                        // src_audio is interleaved [L0,R0,L1,R1,...]: access via s*2+ch
-                        for (int si = 0; si < fade_start; si++) {
-                            pred[si] = src_audio[(size_t) si * 2 + ch];
-                        }
-                        for (int si = fade_start; si < start_s; si++) {
-                            // left ramp: 0->1 toward repaint zone (excl endpoints)
-                            int   rl  = start_s - fade_start;
-                            float m   = (float) (si - fade_start + 1) / (float) (rl + 1);
-                            float src = src_audio[(size_t) si * 2 + ch];
-                            pred[si]  = m * pred[si] + (1.0f - m) * src;
-                        }
-                        // [start_s, end_s): keep generated s.output as-is (mask=1)
-                        for (int si = end_s; si < fade_end; si++) {
-                            // right ramp: 1->0 away from repaint zone (excl endpoints)
-                            int   rl  = fade_end - end_s;
-                            float m   = (float) (fade_end - si) / (float) (rl + 1);
-                            float src = src_audio[(size_t) si * 2 + ch];
-                            pred[si]  = m * pred[si] + (1.0f - m) * src;
-                        }
-                        for (int si = fade_end; si < T_splice; si++) {
-                            pred[si] = src_audio[(size_t) si * 2 + ch];
-                        }
+        // Waveform splice: replace non-repaint regions with original source audio.
+        // Python: apply_repaint_waveform_splice (when mode != aggressive)
+        // mask[s] = 1.0 inside repaint region, 0.0 outside, linear ramp at edges.
+        // result = mask * pred + (1-mask) * src  [planar stereo: L:s.T, R:s.T]
+        bool have_repaint_region = s.is_repaint || s.is_lego_region;
+        if (have_repaint_region && src_audio) {  // always splice (non-aggressive)
+            int T_splice = out[b].n_samples < src_len ? out[b].n_samples : src_len;
+            int start_s  = (int) (s.rs * 48000.0f);
+            int end_s    = (int) (s.re * 48000.0f);
+            start_s      = start_s < 0 ? 0 : (start_s > T_splice ? T_splice : start_s);
+            end_s        = end_s < start_s ? start_s : (end_s > T_splice ? T_splice : end_s);
+            // skip splice if region covers everything
+            if (start_s > 0 || end_s < T_splice) {
+                int cf_s       = (int) (s.repaint_wav_cf_sec * 48000.0f);
+                int fade_start = start_s - cf_s > 0 ? start_s - cf_s : 0;
+                int fade_end   = end_s + cf_s < T_splice ? end_s + cf_s : T_splice;
+                for (int ch = 0; ch < 2; ch++) {
+                    float * pred = out[b].samples + (size_t) ch * out[b].n_samples;
+                    // src_audio is interleaved [L0,R0,L1,R1,...]: access via s*2+ch
+                    for (int si = 0; si < fade_start; si++) {
+                        pred[si] = src_audio[(size_t) si * 2 + ch];
                     }
-                    fprintf(stderr, "[WAV-Splice Batch%d] wav splice %.1fs-%.1fs cf=%.0fms\n", b, s.rs, s.re,
-                            s.repaint_wav_cf_sec * 1000.0f);
+                    for (int si = fade_start; si < start_s; si++) {
+                        // left ramp: 0->1 toward repaint zone (excl endpoints)
+                        int   rl  = start_s - fade_start;
+                        float m   = (float) (si - fade_start + 1) / (float) (rl + 1);
+                        float src = src_audio[(size_t) si * 2 + ch];
+                        pred[si]  = m * pred[si] + (1.0f - m) * src;
+                    }
+                    // [start_s, end_s): keep generated s.output as-is (mask=1)
+                    for (int si = end_s; si < fade_end; si++) {
+                        // right ramp: 1->0 away from repaint zone (excl endpoints)
+                        int   rl  = fade_end - end_s;
+                        float m   = (float) (fade_end - si) / (float) (rl + 1);
+                        float src = src_audio[(size_t) si * 2 + ch];
+                        pred[si]  = m * pred[si] + (1.0f - m) * src;
+                    }
+                    for (int si = fade_end; si < T_splice; si++) {
+                        pred[si] = src_audio[(size_t) si * 2 + ch];
+                    }
                 }
+                fprintf(stderr, "[WAV-Splice Batch%d] wav splice %.1fs-%.1fs cf=%.0fms\n", b, s.rs, s.re,
+                        s.repaint_wav_cf_sec * 1000.0f);
             }
         }
     }

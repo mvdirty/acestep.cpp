@@ -8,29 +8,15 @@
 
 #include "pipeline-synth.h"
 
-#include "bpe.h"
-#include "cond-enc.h"
-#include "debug.h"
-#include "dit-sampler.h"
-#include "dit.h"
-#include "fsq-detok.h"
-#include "fsq-tok.h"
 #include "gguf-weights.h"
-#include "philox.h"
 #include "pipeline-synth-impl.h"
 #include "pipeline-synth-ops.h"
-#include "qwen3-enc.h"
-#include "request.h"
 #include "task-types.h"
-#include "timer.h"
-#include "vae-enc.h"
-#include "vae.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -103,11 +89,15 @@ static bool load_dit_cpu_side(AceSynth * ctx, const char * dit_path) {
 
 AceSynth * ace_synth_load(const AceSynthParams * params) {
     if (!params->dit_path) {
-        fprintf(stderr, "[Ace-Synth] ERROR: dit_path is NULL\n");
+        fprintf(stderr, "[Synth-Load] ERROR: dit_path is NULL\n");
         return NULL;
     }
     if (!params->text_encoder_path) {
-        fprintf(stderr, "[Ace-Synth] ERROR: text_encoder_path is NULL\n");
+        fprintf(stderr, "[Synth-Load] ERROR: text_encoder_path is NULL\n");
+        return NULL;
+    }
+    if (!params->vae_path) {
+        fprintf(stderr, "[Synth-Load] ERROR: vae_path is NULL\n");
         return NULL;
     }
 
@@ -195,13 +185,13 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
         fprintf(stderr, "[Synth-Load] Tokenizer: %.1f ms\n", timer.ms());
     }
 
-    fprintf(stderr, "[Ace-Synth] Resident modules loaded, turbo=%s, DiT+VAE loaded on demand\n",
+    fprintf(stderr, "[Synth-Load] Resident modules loaded, turbo=%s, DiT+VAE loaded on demand\n",
             ctx->is_turbo ? "yes" : "no");
     if (params->clamp_fp16) {
-        fprintf(stderr, "[Ace-Synth] FP16 clamp enabled\n");
+        fprintf(stderr, "[Synth-Load] FP16 clamp enabled\n");
     }
     if (!params->use_batch_cfg) {
-        fprintf(stderr, "[Ace-Synth] Batched DiT CFG disabled (split 2-pass forwards)\n");
+        fprintf(stderr, "[Synth-Load] Batched DiT CFG disabled (split 2-pass forwards)\n");
     }
 
     return ctx;
@@ -246,7 +236,7 @@ void ace_synth_dit_unload(AceSynth * ctx) {
 }
 
 bool ace_synth_vae_load(AceSynth * ctx) {
-    if (!ctx || !ctx->params.vae_path) {
+    if (!ctx) {
         return false;
     }
     if (ctx->have_vae) {
@@ -402,8 +392,8 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
         s.repaint_crossfade_frames = (int) (25.0f * inv + 0.5f);
         s.repaint_wav_cf_sec       = 0.05f * inv;
         if (s.is_repaint || s.is_lego_region) {
-            fprintf(stderr, "[Synth] repaint_strength=%.2f -> injection=%.2f, crossfade=%d frames, wav_cf=%.0fms\n", rs,
-                    s.repaint_injection_ratio, s.repaint_crossfade_frames, s.repaint_wav_cf_sec * 1000.0f);
+            fprintf(stderr, "[Synth-Run] repaint_strength=%.2f -> injection=%.2f, crossfade=%d frames, wav_cf=%.0fms\n",
+                    rs, s.repaint_injection_ratio, s.repaint_crossfade_frames, s.repaint_wav_cf_sec * 1000.0f);
         }
     }
 
@@ -441,32 +431,32 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
             s.rr.audio_cover_strength = 1.0f;  // all DiT steps hear the backing track
             s.instruction_str         = dit_instr_lego(track_upper);
             validate_track_names(s.rr.track, "Lego");
-            fprintf(stderr, "[Synth] task=%s\n", s.task.c_str());
+            fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
             if (ctx->is_turbo) {
-                fprintf(stderr, "[Synth] WARNING: lego requires base model, turbo output incoherent\n");
+                fprintf(stderr, "[Synth-Run] WARNING: lego requires base model, turbo output incoherent\n");
             }
         } else if (s.task == TASK_EXTRACT) {
             s.use_source_context      = true;
             s.rr.audio_cover_strength = 1.0f;  // DiT sees the full mix
             s.instruction_str         = dit_instr_extract(track_upper);
             validate_track_names(s.rr.track, "Extract");
-            fprintf(stderr, "[Synth] task=%s\n", s.task.c_str());
+            fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
             if (ctx->is_turbo) {
-                fprintf(stderr, "[Synth] WARNING: extract requires base model, turbo output incoherent\n");
+                fprintf(stderr, "[Synth-Run] WARNING: extract requires base model, turbo output incoherent\n");
             }
         } else if (s.task == TASK_COMPLETE) {
             s.use_source_context      = true;
             s.rr.audio_cover_strength = 1.0f;  // DiT sees the full isolated stem
             s.instruction_str         = dit_instr_complete(track_upper);
             validate_track_names(s.rr.track, "Complete");
-            fprintf(stderr, "[Synth] task=%s\n", s.task.c_str());
+            fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
             if (ctx->is_turbo) {
-                fprintf(stderr, "[Synth] WARNING: complete requires base model, turbo output incoherent\n");
+                fprintf(stderr, "[Synth-Run] WARNING: complete requires base model, turbo output incoherent\n");
             }
         }
         // validation: tasks that need source audio or codes
         if (s.use_source_context && !s.have_cover && !s.have_codes) {
-            fprintf(stderr, "[Synth] ERROR: task '%s' requires source audio or audio codes\n", s.task.c_str());
+            fprintf(stderr, "[Synth-Run] ERROR: task '%s' requires source audio or audio codes\n", s.task.c_str());
             delete job;
             return NULL;
         }
@@ -536,7 +526,7 @@ int ace_synth_job_run_vae(AceSynth *    ctx,
     if (!ctx || !job || !out) {
         return -1;
     }
-    if (!ctx->have_vae && ctx->params.vae_path) {
+    if (!ctx->have_vae) {
         fprintf(stderr, "[Synth-Phase] FATAL: run_vae called without VAE loaded\n");
         return -1;
     }

@@ -16,7 +16,7 @@ struct AceSynthJob;
 struct AceSynthParams {
     const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
     const char * dit_path;           // DiT GGUF (required)
-    const char * vae_path;           // VAE GGUF (NULL = no audio decode, latent only)
+    const char * vae_path;           // VAE GGUF (required)
     const char * adapter_path;       // adapter safetensors or directory (NULL to disable)
     float        adapter_scale;      // user scale multiplier, 1.0 by default
     bool         use_fa;             // flash attention (default: true)
