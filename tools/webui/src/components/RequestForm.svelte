@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { RotateCcw, Download, FolderOpen } from '@lucide/svelte';
+	import { RotateCcw, Download, FolderOpen, X } from '@lucide/svelte';
 	import { app, toast, setRequest } from '../lib/state.svelte.js';
 	import { rollDice } from '../lib/dice.js';
 	import {
@@ -552,7 +552,7 @@
 
 	<div class="section-title lyrics-header">
 		Lyrics
-		<label class="instrumental-toggle" title="Set lyrics to [Instrumental] and language to unknown">
+		<label class="header-toggle" title="Set lyrics to [Instrumental] and language to unknown">
 			<input type="checkbox" checked={instrumental} onchange={toggleInstrumental} /> Instrumental
 		</label>
 	</div>
@@ -564,14 +564,15 @@
 
 	<div class="section-title metadata-header">
 		Metadata
-		<span
-			class="clear-link"
-			role="button"
-			tabindex="0"
-			title="Clear all metadata fields (LM will guess them)"
+		<button
+			type="button"
+			class="clear-btn"
+			title="Clear metadata"
 			onclick={clearMetadata}
-			onkeydown={(e) => e.key === 'Enter' && clearMetadata()}>Clear</span
+			aria-label="Clear metadata"
 		>
+			<X size={20} />
+		</button>
 	</div>
 	<div class="meta-grid">
 		<label
@@ -769,14 +770,15 @@
 
 	<details open class="has-clear">
 		<summary>Flow matching parameters</summary>
-		<span
-			class="clear-link details-clear"
-			role="button"
-			tabindex="0"
-			title="Reset all flow matching parameters to auto-detect defaults"
+		<button
+			type="button"
+			class="clear-btn details-clear"
+			title="Clear flow matching parameters"
 			onclick={clearFlowMatching}
-			onkeydown={(e) => e.key === 'Enter' && clearFlowMatching()}>Clear</span
+			aria-label="Clear flow matching parameters"
 		>
+			<X size={20} />
+		</button>
 		<div class="details-body">
 			<div class="meta-grid">
 				<label
@@ -955,7 +957,7 @@
 		align-items: center;
 		justify-content: space-between;
 	}
-	.instrumental-toggle {
+	.header-toggle {
 		display: flex;
 		flex-direction: row;
 		align-items: center;
@@ -965,7 +967,7 @@
 		color: var(--fg-dim);
 		cursor: pointer;
 	}
-	.instrumental-toggle input[type='checkbox'] {
+	.header-toggle input[type='checkbox'] {
 		cursor: pointer;
 	}
 	.metadata-header {
@@ -981,13 +983,18 @@
 		top: 0.4rem;
 		right: 0;
 	}
-	.clear-link {
-		font-size: 0.8rem;
-		font-weight: 400;
+	.clear-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		border: none;
+		background: transparent;
 		color: var(--fg-dim);
 		cursor: pointer;
+		line-height: 0;
 	}
-	.clear-link:hover {
+	.clear-btn:hover {
 		color: var(--fg);
 	}
 	textarea,
