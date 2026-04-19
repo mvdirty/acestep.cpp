@@ -798,6 +798,12 @@ int ops_vae_decode_and_splice(const AceSynth * ctx,
         // Copy to s.output buffer
         int n_total    = 2 * T_audio;
         out[b].samples = (float *) malloc((size_t) n_total * sizeof(float));
+        if (!out[b].samples) {
+            fprintf(stderr, "[VAE-Decode Batch%d] ERROR: OOM allocating output (%d samples)\n", b, n_total);
+            out[b].n_samples   = 0;
+            out[b].sample_rate = 48000;
+            continue;
+        }
         memcpy(out[b].samples, audio.data(), (size_t) n_total * sizeof(float));
         out[b].n_samples   = T_audio;
         out[b].sample_rate = 48000;

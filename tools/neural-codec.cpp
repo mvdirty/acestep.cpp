@@ -194,6 +194,11 @@ static float * read_latent(const char * path, int * T_latent) {
         }
 
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
+        if (!data) {
+            fprintf(stderr, "[Latent] OOM allocating Q8 decode buffer for %u frames\n", t);
+            fclose(f);
+            return NULL;
+        }
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
             if (fread(&scale_f16, 2, 1, f) != 1) {
@@ -241,6 +246,11 @@ static float * read_latent(const char * path, int * T_latent) {
         }
 
         float * data = (float *) malloc((size_t) t * 64 * sizeof(float));
+        if (!data) {
+            fprintf(stderr, "[Latent] OOM allocating Q4 decode buffer for %u frames\n", t);
+            fclose(f);
+            return NULL;
+        }
         for (int i = 0; i < (int) t; i++) {
             ggml_fp16_t scale_f16;
             if (fread(&scale_f16, 2, 1, f) != 1) {
@@ -291,6 +301,11 @@ static float * read_latent(const char * path, int * T_latent) {
 
     *T_latent    = (int) (fsize / (64 * sizeof(float)));
     float * data = (float *) malloc(fsize);
+    if (!data) {
+        fprintf(stderr, "[Latent] OOM allocating f32 decode buffer (%ld bytes)\n", fsize);
+        fclose(f);
+        return NULL;
+    }
     if (fread(data, 1, fsize, f) != (size_t) fsize) {
         fclose(f);
         free(data);

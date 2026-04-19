@@ -126,8 +126,14 @@ static float * audio_io_read_mp3_buf(const uint8_t * data, size_t size, int * T_
             }
             int need = pcm_count + samples * out_nch;
             if (need > pcm_cap) {
-                pcm_cap = (need < 65536) ? 65536 : need * 2;
-                pcm_buf = (short *) realloc(pcm_buf, (size_t) pcm_cap * sizeof(short));
+                pcm_cap         = (need < 65536) ? 65536 : need * 2;
+                short * new_buf = (short *) realloc(pcm_buf, (size_t) pcm_cap * sizeof(short));
+                if (!new_buf) {
+                    fprintf(stderr, "[Audio] OOM while decoding MP3 frames\n");
+                    free(pcm_buf);
+                    return NULL;
+                }
+                pcm_buf = new_buf;
             }
             memcpy(pcm_buf + pcm_count, pcm, (size_t) samples * (size_t) out_nch * sizeof(short));
             pcm_count += samples * out_nch;
@@ -345,9 +351,13 @@ static void audio_normalize(float * audio, int n_total, int peak_clip = 10) {
 }
 
 // convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...].
-// returns malloc'd buffer of 2*T floats. caller must free().
+// returns malloc'd buffer of 2*T floats. caller must free(). returns NULL on OOM.
 static float * audio_planar_to_interleaved(const float * planar, int T) {
     float * out = (float *) malloc((size_t) T * 2 * sizeof(float));
+    if (!out) {
+        fprintf(stderr, "[Audio] OOM allocating interleaved buffer for %d samples\n", T);
+        return NULL;
+    }
     for (int t = 0; t < T; t++) {
         out[t * 2 + 0] = planar[t];
         out[t * 2 + 1] = planar[T + t];
@@ -710,6 +720,11 @@ static std::string audio_encode_mp3(const float * audio,
                 int warm_start = chunk_start - warm_len;
 
                 float * buf = (float *) malloc((size_t) warm_len * 2 * sizeof(float));
+                if (!buf) {
+                    fprintf(stderr, "[MP3] OOM allocating warmup buffer, skipping tid=%d\n", tid);
+                    mp3enc_free(e);
+                    return;
+                }
                 memcpy(buf, enc_audio + warm_start, (size_t) warm_len * sizeof(float));
                 memcpy(buf + warm_len, enc_audio + enc_T + warm_start, (size_t) warm_len * sizeof(float));
 
@@ -736,6 +751,10 @@ static std::string audio_encode_mp3(const float * audio,
             int len = (p + sub <= chunk_len) ? sub : (chunk_len - p);
 
             float * buf = (float *) malloc((size_t) len * 2 * sizeof(float));
+            if (!buf) {
+                fprintf(stderr, "[MP3] OOM allocating chunk buffer tid=%d, aborting this chunk\n", tid);
+                break;
+            }
             memcpy(buf, enc_audio + chunk_start + p, (size_t) len * sizeof(float));
             memcpy(buf + len, enc_audio + enc_T + chunk_start + p, (size_t) len * sizeof(float));
 
