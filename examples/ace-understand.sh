@@ -1,13 +1,7 @@
 #!/bin/bash
-# Roundtrip: audio : understand : SFT DiT : MP3
+# Understand: audio in, JSON out with codes and metadata
 #
 # Usage: ./ace-understand.sh input.wav (or input.mp3)
-#
-# understand:
-# input + ace-understand.json : ace-understand-out.json (audio codes + metadata)
-#
-# ace-synth:
-# ace-understand-out.json : ace-understand-out0.mp3
 
 set -eu
 
@@ -23,8 +17,3 @@ input="$1"
     --src-audio "$input" \
     --request ace-understand.json \
     -o ace-understand-out.json
-
-../build/ace-synth \
-    --models ../models \
-    --src-audio "$input" \
-    --request ace-understand-out.json

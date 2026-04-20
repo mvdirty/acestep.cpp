@@ -127,9 +127,9 @@ const float *   store_silence(ModelStore * s, const char * dit_path);
 MetadataFSM *   store_fsm(ModelStore * s, const char * lm_path, int vocab_size);
 const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path);
 
-// Observability: sum of currently resident GPU module weight buffers,
-// and the count of loaded GPU modules. Useful for logs and future
-// budget-aware scheduling.
+// Observability: sum of currently resident GPU module weight buffers, and
+// the count of loaded GPU modules. Used by test-model-store to assert
+// eviction policy invariants.
 size_t store_vram_bytes(const ModelStore * s);
 int    store_gpu_module_count(const ModelStore * s);
 

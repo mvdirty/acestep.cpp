@@ -18,7 +18,6 @@
 #include "timer.h"
 #include "vae-enc.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,7 +25,6 @@
 #include <cstring>
 #include <random>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 struct AceUnderstand {

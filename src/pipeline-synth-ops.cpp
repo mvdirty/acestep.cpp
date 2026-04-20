@@ -9,13 +9,12 @@
 #include "dit-sampler.h"
 #include "philox.h"
 #include "pipeline-synth-impl.h"
+#include "task-types.h"
 #include "vae-enc.h"
 
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -167,17 +166,20 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
         s.shift = ctx->meta->is_turbo ? 3.0f : 1.0f;
     }
 
-    // Audio codes: scan all requests to determine s.T from the longest code set.
-    // Per-batch codes are decoded in the s.context building loop below.
+    // Audio codes: parse once per request and stash in s.per_codes so
+    // ops_build_context does not have to re-parse. Also records the longest
+    // set (drives s.T) and whether any batch item carries codes at all.
     // Shorter code sets are padded with silence, longer ones are never truncated.
+    s.per_codes.assign(batch_n, {});
     s.max_codes_len = 0;
     s.have_codes    = false;
     for (int b = 0; b < batch_n; b++) {
-        std::vector<int> cb = parse_codes_string(reqs[b].audio_codes);
-        if ((int) cb.size() > s.max_codes_len) {
-            s.max_codes_len = (int) cb.size();
+        s.per_codes[b] = parse_codes_string(reqs[b].audio_codes);
+        int sz         = (int) s.per_codes[b].size();
+        if (sz > s.max_codes_len) {
+            s.max_codes_len = sz;
         }
-        if (!cb.empty()) {
+        if (sz > 0) {
             s.have_codes = true;
         }
     }
@@ -361,7 +363,7 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             for (int b = 0; b < batch_n; b++) {
                 std::string text_str;
                 std::string lyric_str;
-                build_prompt_strings(reqs[b], s.nc_instruction_str, s.duration, text_str, lyric_str);
+                build_prompt_strings(reqs[b], DIT_INSTR_TEXT2MUSIC, s.duration, text_str, lyric_str);
 
                 auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
                 auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
@@ -540,13 +542,8 @@ int ops_build_context(const AceSynth * ctx, const AceRequest * reqs, int batch_n
         std::vector<std::vector<float>> decoded_per_b(batch_n);
         std::vector<int>                decoded_T_per_b(batch_n, 0);
 
-        bool any_codes = false;
-        for (int b = 0; b < batch_n; b++) {
-            if (!parse_codes_string(reqs[b].audio_codes).empty()) {
-                any_codes = true;
-                break;
-            }
-        }
+        // s.have_codes is already posed by ops_resolve_params over the same batch.
+        bool any_codes = s.have_codes;
 
         if (any_codes) {
             DetokGGML * detok = store_require_fsq_detok(ctx->store, ctx->fsq_detok_key);
@@ -560,7 +557,7 @@ int ops_build_context(const AceSynth * ctx, const AceRequest * reqs, int batch_n
             }
 
             for (int b = 0; b < batch_n; b++) {
-                std::vector<int> codes_b = parse_codes_string(reqs[b].audio_codes);
+                const std::vector<int> & codes_b = s.per_codes[b];
                 if (codes_b.empty()) {
                     continue;
                 }

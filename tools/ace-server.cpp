@@ -504,14 +504,14 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
     fprintf(stderr, "[Server] Job %s done (LM, %d results)\n", job->id.c_str(), lm_batch_size);
 }
 
-// POST /lm[?mode=inspire|format]
-// accepts: AceRequest JSON (+ optional "lm_model" for LM selection)
+// POST /lm
+// accepts: AceRequest JSON (lm_mode in the body selects the generation mode).
 // returns: JSON {"id":"N"} immediately. result is a JSON array of enriched
 // AceRequests (lm_batch_size controls count).
 // modes (AceRequest.lm_mode):
-//   generate  full: metadata + lyrics + audio codes
-//   inspire   short caption -> metadata + lyrics (no codes)
-//   format    caption + lyrics -> metadata + lyrics (no codes)
+//   generate  metadata + lyrics + audio_codes  (full composer pass)
+//   inspire   metadata + lyrics                (audio_codes stays empty)
+//   format    metadata + lyrics                (audio_codes stays empty)
 static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     if (g_registry.lm.empty()) {
         json_error(res, 501, "No LM models in registry");

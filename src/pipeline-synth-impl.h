@@ -71,6 +71,10 @@ struct SynthState {
     bool  have_codes;
     int   max_codes_len;
 
+    // audio_codes parsed once per request in ops_resolve_params, reused by
+    // ops_build_context. Indexed [0..batch_n). Empty entries mean no codes.
+    std::vector<std::vector<int>> per_codes;
+
     // shared params (from reqs[0])
     AceRequest rr;
     float      duration;
@@ -102,8 +106,7 @@ struct SynthState {
     float repaint_wav_cf_sec;
 
     // DiT instruction
-    std::string instruction_str;     // main DiT instruction (set by orchestrator)
-    std::string nc_instruction_str;  // non-cover pass instruction (for cover_steps < 1.0 switching)
+    std::string instruction_str;  // main DiT instruction (set by orchestrator)
 
     // conditioning tensors
     std::vector<float> timbre_feats;

@@ -48,8 +48,8 @@ int ace_understand_generate(AceUnderstand *    ctx,
 
 void ace_understand_free(AceUnderstand * ctx);
 
-// Read the LM ModelKey the context builds for store_require_lm. Must match
-// the one ace_lm builds for the same path and batch settings, otherwise the
-// store loads the LM twice under --keep-loaded.
+// Read the LM ModelKey the context builds for store_require_lm. Used by
+// test-model-store to verify both ace_understand and ace_lm resolve to the
+// same LM instance; a drift here silently doubles VRAM under --keep-loaded.
 struct ModelKey;
 const ModelKey * ace_understand_lm_key(const AceUnderstand * ctx);

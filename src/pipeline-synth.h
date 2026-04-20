@@ -83,9 +83,6 @@ int ace_synth_job_run_vae(AceSynth *    ctx,
                           bool (*cancel)(void *) = nullptr,
                           void * cancel_data     = nullptr);
 
-// How many output slots the job expects. Equals the batch_n passed to run_dit.
-int ace_synth_job_batch_n(const AceSynthJob * job);
-
 void ace_synth_job_free(AceSynthJob * job);
 
 void ace_audio_free(AceAudio * audio);

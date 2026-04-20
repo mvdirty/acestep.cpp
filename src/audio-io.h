@@ -5,6 +5,8 @@
 // All functions use planar stereo float: [L: T samples][R: T samples].
 // Part of acestep.cpp. MIT license.
 
+#include "task-types.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -376,21 +378,21 @@ enum WavFormat {
 // Accepts: mp3, wav16, wav24, wav32. Returns false on unknown format.
 // Also accepts NULL and "mp3" as default (is_mp3 = true).
 static bool audio_parse_format(const char * s, bool & is_mp3, WavFormat & wav_fmt) {
-    if (!s || !strcmp(s, "mp3")) {
+    if (!s || !strcmp(s, OUTPUT_FORMAT_MP3)) {
         is_mp3 = true;
         return true;
     }
-    if (!strcmp(s, "wav16")) {
+    if (!strcmp(s, OUTPUT_FORMAT_WAV16)) {
         is_mp3  = false;
         wav_fmt = WAV_S16;
         return true;
     }
-    if (!strcmp(s, "wav24")) {
+    if (!strcmp(s, OUTPUT_FORMAT_WAV24)) {
         is_mp3  = false;
         wav_fmt = WAV_S24;
         return true;
     }
-    if (!strcmp(s, "wav32")) {
+    if (!strcmp(s, OUTPUT_FORMAT_WAV32)) {
         is_mp3  = false;
         wav_fmt = WAV_F32;
         return true;

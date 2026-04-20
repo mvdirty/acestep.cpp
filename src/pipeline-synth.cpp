@@ -122,7 +122,6 @@ static AceSynthJob * alloc_job(AceSynth * ctx, const AceRequest * reqs, int batc
     s.is_lego_region     = false;
     s.have_cover         = false;
     s.T_cover            = 0;
-    s.nc_instruction_str = DIT_INSTR_TEXT2MUSIC;
     debug_init(&s.dbg, ctx->params.dump_dir);
     return job;
 }
@@ -591,10 +590,6 @@ int ace_synth_job_run_vae(AceSynth *    ctx,
     int           sp_len   = job->state.padded_src.empty() ? splice_len : (int) (job->state.padded_src.size() / 2);
 
     return ops_vae_decode_and_splice(ctx, job->batch_n, out, job->state, sp_audio, sp_len, cancel, cancel_data);
-}
-
-int ace_synth_job_batch_n(const AceSynthJob * job) {
-    return job ? job->batch_n : 0;
 }
 
 void ace_synth_job_free(AceSynthJob * job) {
