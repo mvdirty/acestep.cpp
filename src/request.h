@@ -59,15 +59,33 @@ struct AceRequest {
     // 1.0 = aggressive (pure diffusion, no injection).
     float repaint_strength;  // 0.5
 
-    // task type: "" = auto-detect from data, or one of:
-    // text2music, cover, cover-nofsq, repaint, lego, extract, complete
-    std::string task_type;  // ""
+    // task type: one of text2music, cover, cover-nofsq, repaint, lego, extract, complete.
+    // Default: text2music.
+    std::string task_type;  // "text2music"
 
     // track name for lego/extract/complete (e.g. "vocals", "drums", "guitar")
     std::string track;  // ""
 
-    // inference method: "" or "ode" = ODE Euler, "sde" = SDE Stochastic
-    std::string infer_method;  // ""
+    // inference method: "ode" = ODE Euler, "sde" = SDE Stochastic. Default: ode.
+    std::string infer_method;  // "ode"
+
+    // LM mode: "generate" (full: metadata + lyrics + codes),
+    // "inspire" (short query -> metadata + lyrics, no codes),
+    // "format" (caption + lyrics -> metadata + lyrics, no codes). Default: generate.
+    std::string lm_mode;  // "generate"
+
+    // Audio output format: "mp3", "wav16", "wav24", "wav32". Default: mp3.
+    std::string output_format;  // "mp3"
+
+    // model selection. synth_model and lm_model are resolved through the
+    // registry scanned from --models <dir>, by both the HTTP server and the
+    // CLI binaries. An empty value falls to the first matching entry of the
+    // registry. adapter and adapter_scale are read by server and ace-synth
+    // and resolved against --adapters <dir> when set.
+    std::string synth_model;    // ""
+    std::string lm_model;       // ""
+    std::string adapter;        // ""
+    float       adapter_scale;  // 1.0
 
     // audio output: peak clip via percentile normalization.
     // 0 = peak normalization (100.0000th percentile, no clipping).

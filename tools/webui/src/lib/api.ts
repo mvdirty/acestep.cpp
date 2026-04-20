@@ -21,29 +21,32 @@ export function lmSubmit(req: AceRequest): Promise<string> {
 	});
 }
 
-// POST /lm?mode=inspire: submit inspire request, returns job ID
+// POST /lm with lm_mode="inspire": returns job ID
 export function lmSubmitInspire(req: AceRequest): Promise<string> {
-	return submitJob('lm?mode=inspire', {
+	return submitJob('lm', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(req)
+		body: JSON.stringify({ ...req, lm_mode: 'inspire' })
 	});
 }
 
-// POST /lm?mode=format: submit format request, returns job ID
+// POST /lm with lm_mode="format": returns job ID
 export function lmSubmitFormat(req: AceRequest): Promise<string> {
-	return submitJob('lm?mode=format', {
+	return submitJob('lm', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(req)
+		body: JSON.stringify({ ...req, lm_mode: 'format' })
 	});
 }
 
 // POST /synth: submit synth request, returns job ID
 export function synthSubmit(reqs: AceRequest[], format: string): Promise<string> {
-	const url = format !== 'mp3' ? `synth?format=${format}` : 'synth';
-	const body = reqs.length === 1 ? JSON.stringify(reqs[0]) : JSON.stringify(reqs);
-	return submitJob(url, {
+	const reqsWithFormat = reqs.map((r) => ({ ...r, output_format: format }));
+	const body =
+		reqsWithFormat.length === 1
+			? JSON.stringify(reqsWithFormat[0])
+			: JSON.stringify(reqsWithFormat);
+	return submitJob('synth', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body
@@ -57,13 +60,16 @@ export function synthSubmitWithAudio(
 	refAudio: Blob | null,
 	format: string
 ): Promise<string> {
-	const url = format !== 'mp3' ? `synth?format=${format}` : 'synth';
-	const body = reqs.length === 1 ? JSON.stringify(reqs[0]) : JSON.stringify(reqs);
+	const reqsWithFormat = reqs.map((r) => ({ ...r, output_format: format }));
+	const body =
+		reqsWithFormat.length === 1
+			? JSON.stringify(reqsWithFormat[0])
+			: JSON.stringify(reqsWithFormat);
 	const form = new FormData();
 	form.append('request', new Blob([body], { type: 'application/json' }), 'request.json');
 	if (srcAudio) form.append('audio', srcAudio, 'src.audio');
 	if (refAudio) form.append('ref_audio', refAudio, 'ref.audio');
-	return submitJob(url, { method: 'POST', body: form });
+	return submitJob('synth', { method: 'POST', body: form });
 }
 
 // GET /job?id=X: poll job status

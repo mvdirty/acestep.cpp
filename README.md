@@ -117,11 +117,12 @@ The server exposes three POST endpoints and two GET endpoints:
 
 **POST /lm** - Generate lyrics and audio codes from a caption. Returns JSON.
 
-**POST /synth** - Render audio codes into MP3 or WAV (`?wav=1`).
-Accepts JSON or multipart (with source audio for cover/repaint modes).
+**POST /synth** - Render audio codes into MP3 or WAV (selected by the
+`output_format` field in the request JSON). Accepts JSON or multipart
+(with source audio for cover/repaint modes).
 
 **POST /understand** - Reverse pipeline: audio in, metadata + lyrics + codes out.
-Accepts multipart (audio file) or JSON (codes-only).
+Multipart only (audio file required, optional request JSON for params).
 
 **GET /health** - Returns `{"status":"ok"}`.
 
@@ -140,15 +141,13 @@ For scripting without the server, `ace-lm` and `ace-synth` work as a pipe:
 ```bash
 # LM generates lyrics + codes
 ./build/ace-lm \
-    --request /tmp/request.json \
-    --lm models/acestep-5Hz-lm-4B-Q8_0.gguf
+    --models models \
+    --request /tmp/request.json
 
 # DiT + VAE render to audio
 ./build/ace-synth \
-    --request /tmp/request0.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf
+    --models models \
+    --request /tmp/request0.json
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full JSON reference,

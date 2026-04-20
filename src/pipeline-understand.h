@@ -12,8 +12,8 @@ struct ModelStore;
 
 struct AceUnderstandParams {
     const char * model_path;   // LM GGUF (required, unless dump_dir set for tok-only mode)
-    const char * dit_path;     // DiT GGUF (required for audio input, has FSQ codebook)
-    const char * vae_path;     // VAE GGUF (required for audio input, has encoder)
+    const char * dit_path;     // DiT GGUF (required, has FSQ codebook)
+    const char * vae_path;     // VAE GGUF (required, has encoder)
     const char * dump_dir;     // dump tok_latents + tok_codes (NULL = disabled)
     int          max_seq;      // KV cache length
     int          max_batch;    // must match ace_lm max_batch so the LM ModelKey is identical
@@ -32,10 +32,9 @@ void ace_understand_default_params(AceUnderstandParams * p);
 AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParams * params);
 
 // Run the understand pipeline.
-// src_audio: interleaved stereo 48kHz [L0,R0,L1,R1,...], or NULL for codes-only mode.
-// src_len: samples per channel (0 if no audio).
-// req: sampling params (temperature, top_p, top_k, seed). In codes-only mode,
-//      req->audio_codes must be filled.
+// src_audio: interleaved stereo 48kHz [L0,R0,L1,R1,...]. Required.
+// src_len: samples per channel.
+// req: sampling params (temperature, top_p, top_k, seed).
 // out: filled with caption, lyrics, metadata, audio_codes, DiT defaults.
 // cancel/cancel_data: abort callback, polled between tokens. NULL = never cancel.
 // Returns 0 on success, -1 on error or cancellation.

@@ -63,14 +63,13 @@ struct SynthState {
     std::vector<float> padded_src;    // interleaved stereo buffer with silence padding
 
     // mode flags
-    std::string task;
-    bool        is_repaint;
-    bool        is_lego_region;
-    float       rs;
-    float       re;
-    bool        use_source_context;
-    bool        have_codes;
-    int         max_codes_len;
+    bool  is_repaint;
+    bool  is_lego_region;
+    float rs;
+    float re;
+    bool  use_source_context;
+    bool  have_codes;
+    int   max_codes_len;
 
     // shared params (from reqs[0])
     AceRequest rr;

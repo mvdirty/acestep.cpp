@@ -1,7 +1,11 @@
 // ace-synth.cpp: ACE-Step synthesis CLI
-// Thin wrapper: parses args, calls pipeline-synth, writes output files.
+// Thin wrapper: parses args, scans the model registry, calls pipeline-synth,
+// writes output files. Model selection (synth_model, adapter, output_format)
+// comes from the request JSON. The registry resolves names to GGUF paths
+// under --models <dir> and --adapters <dir>.
 
 #include "audio-io.h"
+#include "model-registry.h"
 #include "model-store.h"
 #include "pipeline-synth.h"
 #include "request.h"
@@ -21,20 +25,19 @@ static void usage(const char * prog) {
 
     fprintf(stderr, "acestep.cpp %s\n\n", ACE_VERSION);
     fprintf(stderr,
-            "Usage: %s --request <json...> --embedding <gguf> --dit <gguf> --vae <gguf> [options]\n\n"
+            "Usage: %s --models <dir> --request <json...> [options]\n\n"
             "Required:\n"
-            "  --request <json...>     One or more request JSONs (from ace-lm --request)\n"
-            "  --embedding <gguf>      Embedding GGUF file\n"
-            "  --dit <gguf>            DiT GGUF file\n"
-            "  --vae <gguf>            VAE GGUF file\n\n"
-            "Audio:\n"
+            "  --models <dir>          Directory of GGUF model files\n"
+            "  --request <json...>     One or more request JSONs (from ace-lm --request)\n\n"
+            "Optional:\n"
+            "  --adapters <dir>        Directory of adapter files (enables JSON adapter field)\n"
             "  --src-audio <file>      Source audio (WAV or MP3)\n"
             "  --ref-audio <file>      Timbre reference audio (WAV or MP3)\n\n"
-            "Adapter:\n"
-            "  --adapter <path>        Adapter safetensors file or PEFT directory\n"
-            "  --adapter-scale <float> Adapter scaling factor (default: 1.0)\n\n"
-            "Output:\n"
-            "  --format <fmt>          Output format: mp3, wav16, wav24, wav32 (default: mp3)\n"
+            "Model selection comes from the request JSON: synth_model picks the DiT,\n"
+            "adapter picks an adapter from --adapters, output_format picks the output\n"
+            "extension. When synth_model is empty the first DiT in the registry is used;\n"
+            "text-encoder and VAE are always the first in their registry bucket.\n\n"
+            "Audio encoding:\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
@@ -59,21 +62,16 @@ int main(int argc, char ** argv) {
     ace_synth_default_params(&params);
 
     std::vector<const char *> request_paths;
-    const char *              text_enc_gguf  = NULL;
-    const char *              dit_gguf       = NULL;
-    const char *              vae_gguf       = NULL;
+    const char *              models_dir     = NULL;
+    const char *              adapters_dir   = NULL;
     const char *              src_audio_path = NULL;
     const char *              ref_audio_path = NULL;
     const char *              dump_dir       = NULL;
-    const char *              adapter_path   = NULL;
-    float                     adapter_scale  = 1.0f;
     bool                      use_fa         = true;
     bool                      use_batch_cfg  = true;
     bool                      clamp_fp16     = false;
     int                       vae_chunk      = params.vae_chunk;
     int                       vae_overlap    = params.vae_overlap;
-    bool                      is_mp3         = true;
-    WavFormat                 wav_fmt        = WAV_S16;
     int                       mp3_kbps       = 128;
 
     for (int i = 1; i < argc; i++) {
@@ -82,20 +80,14 @@ int main(int argc, char ** argv) {
             while (i + 1 < argc && argv[i + 1][0] != '-') {
                 request_paths.push_back(argv[++i]);
             }
-        } else if (!strcmp(argv[i], "--embedding") && i + 1 < argc) {
-            text_enc_gguf = argv[++i];
-        } else if (!strcmp(argv[i], "--dit") && i + 1 < argc) {
-            dit_gguf = argv[++i];
-        } else if (!strcmp(argv[i], "--vae") && i + 1 < argc) {
-            vae_gguf = argv[++i];
+        } else if (!strcmp(argv[i], "--models") && i + 1 < argc) {
+            models_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
+            adapters_dir = argv[++i];
         } else if (!strcmp(argv[i], "--src-audio") && i + 1 < argc) {
             src_audio_path = argv[++i];
         } else if (!strcmp(argv[i], "--ref-audio") && i + 1 < argc) {
             ref_audio_path = argv[++i];
-        } else if (!strcmp(argv[i], "--adapter") && i + 1 < argc) {
-            adapter_path = argv[++i];
-        } else if (!strcmp(argv[i], "--adapter-scale") && i + 1 < argc) {
-            adapter_scale = (float) atof(argv[++i]);
         } else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
             dump_dir = argv[++i];
         } else if (!strcmp(argv[i], "--no-fa")) {
@@ -108,12 +100,6 @@ int main(int argc, char ** argv) {
             vae_chunk = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vae-overlap") && i + 1 < argc) {
             vae_overlap = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--format") && i + 1 < argc) {
-            if (!audio_parse_format(argv[++i], is_mp3, wav_fmt)) {
-                fprintf(stderr, "Unknown format: %s (expected: mp3, wav, wav16, wav24, wav32)\n", argv[i]);
-                usage(argv[0]);
-                return 1;
-            }
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -126,33 +112,86 @@ int main(int argc, char ** argv) {
         }
     }
 
+    if (!models_dir) {
+        fprintf(stderr, "[CLI] ERROR: --models required\n");
+        usage(argv[0]);
+        return 1;
+    }
     if (request_paths.empty()) {
         fprintf(stderr, "[CLI] ERROR: --request required\n");
         usage(argv[0]);
         return 1;
     }
-    if (!dit_gguf) {
-        fprintf(stderr, "[CLI] ERROR: --dit required\n");
-        usage(argv[0]);
+
+    // Parse all requests first: the first request drives model selection.
+    int                      batch_n = (int) request_paths.size();
+    std::vector<AceRequest>  reqs(batch_n);
+    std::vector<std::string> basenames(batch_n);
+    for (int ri = 0; ri < batch_n; ri++) {
+        const char * rpath = request_paths[ri];
+        if (!request_parse(&reqs[ri], rpath)) {
+            fprintf(stderr, "[Ace-Synth] FATAL: failed to parse %s\n", rpath);
+            return 1;
+        }
+        request_dump(&reqs[ri], stderr);
+        if (reqs[ri].caption.empty() && reqs[ri].task_type != TASK_LEGO && reqs[ri].task_type != TASK_EXTRACT &&
+            reqs[ri].task_type != TASK_COMPLETE) {
+            fprintf(stderr, "[Ace-Synth] FATAL: caption is empty in %s\n", rpath);
+            return 1;
+        }
+        // output basename: strip .json suffix
+        basenames[ri] = rpath;
+        size_t dot    = basenames[ri].rfind(".json");
+        if (dot != std::string::npos) {
+            basenames[ri] = basenames[ri].substr(0, dot);
+        }
+    }
+    fprintf(stderr, "[Ace-Synth] Batch: %d request(s)\n", batch_n);
+
+    // Scan the registry and resolve model paths from the first request.
+    ModelRegistry registry;
+    if (!registry_scan(&registry, models_dir)) {
+        fprintf(stderr, "[Ace-Synth] FATAL: cannot scan --models %s\n", models_dir);
         return 1;
     }
-    if (!text_enc_gguf) {
-        fprintf(stderr, "[CLI] ERROR: --embedding required\n");
-        usage(argv[0]);
+    if (adapters_dir) {
+        registry_scan_adapters(&registry, adapters_dir);
+    }
+    if (registry.dit.empty() || registry.text_enc.empty() || registry.vae.empty()) {
+        fprintf(stderr, "[Ace-Synth] FATAL: registry needs DiT, text-encoder and VAE models\n");
         return 1;
     }
-    if (!vae_gguf) {
-        fprintf(stderr, "[CLI] ERROR: --vae required\n");
-        usage(argv[0]);
+    const ModelEntry * dit_entry =
+        reqs[0].synth_model.empty() ? &registry.dit[0] : registry_find(registry.dit, reqs[0].synth_model.c_str());
+    if (!dit_entry) {
+        fprintf(stderr, "[Ace-Synth] FATAL: synth_model '%s' not found in registry\n", reqs[0].synth_model.c_str());
+        return 1;
+    }
+    const AdapterEntry * adapter_entry = NULL;
+    if (!reqs[0].adapter.empty()) {
+        adapter_entry = registry_find_adapter(registry, reqs[0].adapter.c_str());
+        if (!adapter_entry) {
+            fprintf(stderr, "[Ace-Synth] FATAL: adapter '%s' not found (use --adapters <dir>)\n",
+                    reqs[0].adapter.c_str());
+            return 1;
+        }
+    }
+
+    // Resolve output_format to (is_mp3, wav_fmt).
+    bool      is_mp3  = true;
+    WavFormat wav_fmt = WAV_S16;
+    if (!audio_parse_format(reqs[0].output_format.c_str(), is_mp3, wav_fmt)) {
+        fprintf(stderr, "[Ace-Synth] FATAL: invalid output_format '%s' (use: mp3, wav16, wav24, wav32)\n",
+                reqs[0].output_format.c_str());
         return 1;
     }
 
-    // Fill params from CLI flags.
-    params.text_encoder_path = text_enc_gguf;
-    params.dit_path          = dit_gguf;
-    params.vae_path          = vae_gguf;
-    params.adapter_path      = adapter_path;
-    params.adapter_scale     = adapter_scale;
+    // Fill params from registry lookups and CLI flags.
+    params.text_encoder_path = registry.text_enc[0].path.c_str();
+    params.dit_path          = dit_entry->path.c_str();
+    params.vae_path          = registry.vae[0].path.c_str();
+    params.adapter_path      = adapter_entry ? adapter_entry->path.c_str() : NULL;
+    params.adapter_scale     = reqs[0].adapter_scale;
     params.use_fa            = use_fa;
     params.use_batch_cfg     = use_batch_cfg;
     params.clamp_fp16        = clamp_fp16;
@@ -198,7 +237,6 @@ int main(int argc, char ** argv) {
         if (!planar) {
             fprintf(stderr, "[Ace-Synth] FATAL: cannot read --ref-audio %s\n", ref_audio_path);
             free(src_interleaved);
-            free(ref_interleaved);
             ace_synth_free(ctx);
             store_free(store);
             return 1;
@@ -208,39 +246,6 @@ int main(int argc, char ** argv) {
         free(planar);
         ref_len = T_audio;
     }
-
-    // Parse all requests
-    int                      batch_n = (int) request_paths.size();
-    std::vector<AceRequest>  reqs(batch_n);
-    std::vector<std::string> basenames(batch_n);
-    for (int ri = 0; ri < batch_n; ri++) {
-        const char * rpath = request_paths[ri];
-        request_init(&reqs[ri]);
-        if (!request_parse(&reqs[ri], rpath)) {
-            fprintf(stderr, "[Ace-Synth] FATAL: failed to parse %s\n", rpath);
-            ace_synth_free(ctx);
-            store_free(store);
-            free(src_interleaved);
-            free(ref_interleaved);
-            return 1;
-        }
-        request_dump(&reqs[ri], stderr);
-        if (reqs[ri].caption.empty() && reqs[ri].task_type != TASK_LEGO && reqs[ri].task_type != TASK_EXTRACT) {
-            fprintf(stderr, "[Ace-Synth] FATAL: caption is empty in %s\n", rpath);
-            ace_synth_free(ctx);
-            store_free(store);
-            free(src_interleaved);
-            free(ref_interleaved);
-            return 1;
-        }
-        // output basename: strip .json suffix
-        basenames[ri] = rpath;
-        size_t dot    = basenames[ri].rfind(".json");
-        if (dot != std::string::npos) {
-            basenames[ri] = basenames[ri].substr(0, dot);
-        }
-    }
-    fprintf(stderr, "[Ace-Synth] Batch: %d request(s)\n", batch_n);
 
     // Build one group per original request (same codes = same T per group).
     // synth_batch_size variations within a group share the same T, so they

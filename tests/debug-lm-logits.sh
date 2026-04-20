@@ -3,8 +3,8 @@
 cp ../examples/full.json .
 
 ../build/ace-lm \
+    --models ../models \
     --request full.json \
-    --lm ../models/acestep-5Hz-lm-4B-Q8_0.gguf \
     --dump-logits logits.bin \
     --dump-tokens tokens.csv
 

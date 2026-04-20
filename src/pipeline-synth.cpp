@@ -3,6 +3,10 @@
 // Thin orchestrator over a ModelStore. Holds no GPU module, no CPU-cached
 // DiT state of its own: the store exposes DiTMeta (silence, null_cond, cfg,
 // is_turbo) and each op acquires the GPU modules it needs on the fly.
+//
+// One function per task. Each task reads its inputs, poses its flags on
+// SynthState, then calls the ops in a linear sequence. The dispatcher at the
+// bottom picks the right task function from reqs[0].task_type.
 
 #include "pipeline-synth.h"
 
@@ -102,9 +106,435 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     return ctx;
 }
 
-// Phase 1: everything up to and including DiT generate. The produced job
-// carries the latent output, the resolved state, and any silence-padded source
-// buffer needed later by the wave splice in phase 2.
+// Allocate job and init the SynthState fields every task poses the same way.
+static AceSynthJob * alloc_job(AceSynth * ctx, const AceRequest * reqs, int batch_n) {
+    AceSynthJob * job    = new AceSynthJob();
+    job->batch_n         = batch_n;
+    SynthState & s       = job->state;
+    s.Oc                 = ctx->Oc;
+    s.ctx_ch             = ctx->ctx_ch;
+    s.left_pad_sec       = 0.0f;
+    s.rr                 = reqs[0];
+    s.rs                 = s.rr.repainting_start;
+    s.re                 = s.rr.repainting_end;
+    s.use_sde            = (s.rr.infer_method == INFER_SDE);
+    s.is_repaint         = false;
+    s.is_lego_region     = false;
+    s.have_cover         = false;
+    s.T_cover            = 0;
+    s.nc_instruction_str = DIT_INSTR_TEXT2MUSIC;
+    debug_init(&s.dbg, ctx->params.dump_dir);
+    return job;
+}
+
+// Outpainting: pad src_audio with silence when the region extends beyond
+// source bounds. Returns the (possibly padded) buffer and length via out
+// params; writes s.padded_src and s.left_pad_sec when padding applies.
+static void apply_outpainting_padding(const AceRequest & r,
+                                      const float *      src_audio,
+                                      int                src_len,
+                                      SynthState &       s,
+                                      const float *&     enc_audio,
+                                      int &              enc_len) {
+    enc_audio = src_audio;
+    enc_len   = src_len;
+    if (!src_audio || src_len <= 0) {
+        return;
+    }
+    float src_dur  = (float) src_len / 48000.0f;
+    float rs_raw   = r.repainting_start;
+    float re_raw   = r.repainting_end;
+    float end_time = (re_raw < 0.0f) ? src_dur : re_raw;
+    float lpad     = (rs_raw < 0.0f) ? -rs_raw : 0.0f;
+    float rpad     = (end_time > src_dur) ? end_time - src_dur : 0.0f;
+    if (lpad <= 0.0f && rpad <= 0.0f) {
+        return;
+    }
+    int lpad_s       = (int) (lpad * 48000.0f);
+    int rpad_s       = (int) (rpad * 48000.0f);
+    int padded_total = src_len + lpad_s + rpad_s;
+    s.padded_src.resize((size_t) padded_total * 2);
+    memset(s.padded_src.data(), 0, s.padded_src.size() * sizeof(float));
+    memcpy(s.padded_src.data() + (size_t) lpad_s * 2, src_audio, (size_t) src_len * 2 * sizeof(float));
+    s.left_pad_sec = lpad;
+    enc_audio      = s.padded_src.data();
+    enc_len        = padded_total;
+    fprintf(stderr, "[Outpaint] pad left=%.1fs right=%.1fs total=%.1fs\n", lpad, rpad, (float) padded_total / 48000.0f);
+}
+
+// Shift region coords into the padded reference frame, resolve sentinel end
+// (-1) to either left pad boundary (outpaint) or source end (inpaint).
+// Returns false when the resolved range is empty or inverted.
+static bool adjust_region_coords(SynthState & s, int src_len) {
+    s.rs += s.left_pad_sec;
+    if (s.re < 0.0f) {
+        s.re = (s.rr.repainting_start < 0.0f) ? s.left_pad_sec : (float) src_len / 48000.0f + s.left_pad_sec;
+    } else {
+        s.re += s.left_pad_sec;
+    }
+    if (s.re <= s.rs) {
+        fprintf(stderr, "[Region] ERROR: end (%.1f) <= start (%.1f)\n", s.re, s.rs);
+        return false;
+    }
+    fprintf(stderr, "[Region] %.1fs..%.1fs (canvas=%.1fs)\n", s.rs, s.re, (float) s.T_cover * 1920.0f / 48000.0f);
+    return true;
+}
+
+// Repaint quality: injection ratio, crossfade frames, wav crossfade seconds
+// from rr.repaint_strength. Repaint and lego-region call this.
+static void resolve_repaint_quality(SynthState & s) {
+    float rs = s.rr.repaint_strength;
+    if (rs < 0.0f) {
+        rs = 0.0f;
+    }
+    if (rs > 1.0f) {
+        rs = 1.0f;
+    }
+    float inv                  = 1.0f - rs;
+    s.repaint_injection_ratio  = inv;
+    s.repaint_crossfade_frames = (int) (25.0f * inv + 0.5f);
+    s.repaint_wav_cf_sec       = 0.05f * inv;
+    fprintf(stderr, "[Synth-Run] repaint_strength=%.2f -> injection=%.2f, crossfade=%d frames, wav_cf=%.0fms\n", rs,
+            s.repaint_injection_ratio, s.repaint_crossfade_frames, s.repaint_wav_cf_sec * 1000.0f);
+}
+
+// Uppercase track name for instruction templates, warn on unknown names.
+static std::string prepare_track(const std::string & track, const char * label) {
+    std::string upper = track;
+    for (char & ch : upper) {
+        ch = (char) toupper((unsigned char) ch);
+    }
+    validate_track_names(track, label);
+    return upper;
+}
+
+// Warn when a stem task runs on a turbo model: the training objective does
+// not cover stem isolation, output degrades to incoherent noise.
+static void warn_if_turbo_stem(const AceSynth * ctx, const char * task_name) {
+    if (ctx->meta->is_turbo) {
+        fprintf(stderr, "[Synth-Run] WARNING: %s requires base model, turbo output incoherent\n", task_name);
+    }
+}
+
+// Pin VAE-Enc across two back-to-back encodes (source then timbre) so STRICT
+// does not unload and reload the 160 MB weights between them. On return the
+// pin is released, VAE-Enc can be evicted by the next require. Tasks without
+// source audio pin only when ref_audio is present, or skip the pin entirely
+// when both are absent and timbre falls back to silence.
+static bool pinned_encode_src_and_timbre(AceSynth *    ctx,
+                                         const float * src_audio,
+                                         int           src_len,
+                                         const float * ref_audio,
+                                         int           ref_len,
+                                         SynthState &  s) {
+    bool have_src = src_audio && src_len > 0;
+    bool have_ref = ref_audio && ref_len > 0;
+    if (!have_src && !have_ref) {
+        // Neither encode touches the GPU: timbre takes the silence path.
+        ops_encode_timbre(ctx, NULL, 0, s);
+        return true;
+    }
+    ModelHandle vae_pin(ctx->store, store_require_vae_enc(ctx->store, ctx->vae_enc_key));
+    if (!vae_pin.ptr) {
+        fprintf(stderr, "[Pipeline-Synth] FATAL: store_require_vae_enc (pin) failed\n");
+        return false;
+    }
+    if (have_src) {
+        if (ops_encode_src(ctx, src_audio, src_len, s) != 0) {
+            return false;
+        }
+    }
+    ops_encode_timbre(ctx, ref_audio, ref_len, s);
+    return true;
+}
+
+// Common tail every task ends with once its inputs are encoded and flags are
+// posed: resolve params, resolve T, build schedule, encode text, build
+// context, init noise, run DiT. Returns 0 on success, -1 on error/cancel.
+static int run_tail(AceSynth *         ctx,
+                    const AceRequest * reqs,
+                    int                batch_n,
+                    SynthState &       s,
+                    bool (*cancel)(void *),
+                    void * cancel_data) {
+    if (ops_resolve_params(ctx, reqs, batch_n, s) != 0) {
+        return -1;
+    }
+    if (ops_resolve_T(ctx, s) != 0) {
+        return -1;
+    }
+    ops_build_schedule(s);
+    if (ops_encode_text(ctx, reqs, batch_n, s) != 0) {
+        return -1;
+    }
+    if (ops_build_context(ctx, reqs, batch_n, s) != 0) {
+        return -1;
+    }
+    ops_build_context_silence(ctx, batch_n, s);
+    ops_init_noise_and_repaint(ctx, reqs, batch_n, s);
+    if (ops_dit_generate(ctx, batch_n, s, cancel, cancel_data) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// text2music: pure generation. No src audio. Optional timbre reference.
+// Audio codes from LM (or absent) condition the DiT context.
+static AceSynthJob * run_text2music(AceSynth *         ctx,
+                                    const AceRequest * reqs,
+                                    const float *      ref_audio,
+                                    int                ref_len,
+                                    int                batch_n,
+                                    bool (*cancel)(void *),
+                                    void * cancel_data) {
+    AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s      = job->state;
+    // audio_codes from the LM produce a latent context; empty codes fall back
+    // to silence (DiT-only). The DiT was trained with the cover instruction on
+    // latent context, so the two flags cascade from the same condition.
+    s.use_source_context = !reqs[0].audio_codes.empty();
+    s.instruction_str    = s.use_source_context ? DIT_INSTR_COVER : DIT_INSTR_TEXT2MUSIC;
+
+    if (!pinned_encode_src_and_timbre(ctx, NULL, 0, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// cover: src audio recomposed with FSQ roundtrip degrading the context, so
+// the DiT diverges from the original while staying thematically aligned.
+static AceSynthJob * run_cover(AceSynth *         ctx,
+                               const AceRequest * reqs,
+                               const float *      src_audio,
+                               int                src_len,
+                               const float *      ref_audio,
+                               int                ref_len,
+                               int                batch_n,
+                               bool (*cancel)(void *),
+                               void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'cover' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s      = job->state;
+    s.use_source_context = true;
+    s.instruction_str    = DIT_INSTR_COVER;
+
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+
+    // Snapshot clean VAE latents before the FSQ roundtrip degrades them.
+    // cover_noise_strength blending needs the clean copy.
+    s.noise_blend_latents = s.cover_latents;
+    ops_fsq_roundtrip(ctx, s);
+
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// cover-nofsq: cover without the FSQ roundtrip. DiT works on clean 25Hz VAE
+// latents, output stays close to source structure and timbre. Pass
+// ref_audio = src_audio for best results.
+static AceSynthJob * run_cover_nofsq(AceSynth *         ctx,
+                                     const AceRequest * reqs,
+                                     const float *      src_audio,
+                                     int                src_len,
+                                     const float *      ref_audio,
+                                     int                ref_len,
+                                     int                batch_n,
+                                     bool (*cancel)(void *),
+                                     void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'cover-nofsq' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s      = job->state;
+    s.use_source_context = true;
+    s.instruction_str    = DIT_INSTR_COVER;
+
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// repaint: region-bounded inpaint/outpaint. Source audio is padded with
+// silence when the region extends beyond its bounds. The DiT regenerates
+// inside the region, phase 2 wav-splices the result back into the source.
+static AceSynthJob * run_repaint(AceSynth *         ctx,
+                                 const AceRequest * reqs,
+                                 const float *      src_audio,
+                                 int                src_len,
+                                 const float *      ref_audio,
+                                 int                ref_len,
+                                 int                batch_n,
+                                 bool (*cancel)(void *),
+                                 void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'repaint' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s      = job->state;
+    s.is_repaint         = true;
+    s.use_source_context = true;
+    s.instruction_str    = DIT_INSTR_REPAINT;
+    resolve_repaint_quality(s);
+
+    const float * enc_audio = NULL;
+    int           enc_len   = 0;
+    apply_outpainting_padding(reqs[0], src_audio, src_len, s, enc_audio, enc_len);
+
+    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (!adjust_region_coords(s, src_len)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// lego: stem generation. With valid rs/re: region-constrained, DiT generates
+// only in the zone with full audio context. Without: whole-song generation.
+// audio_cover_strength forced to 1.0 so all DiT steps hear the backing track.
+static AceSynthJob * run_lego(AceSynth *         ctx,
+                              const AceRequest * reqs,
+                              const float *      src_audio,
+                              int                src_len,
+                              const float *      ref_audio,
+                              int                ref_len,
+                              int                batch_n,
+                              bool (*cancel)(void *),
+                              void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'lego' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job       = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s         = job->state;
+    s.is_lego_region        = (s.rr.repainting_end > s.rr.repainting_start);
+    s.use_source_context    = true;
+    std::string track_upper = prepare_track(s.rr.track, "Lego");
+    s.instruction_str       = dit_instr_lego(track_upper);
+    fprintf(stderr, "[Synth-Run] task=%s\n", reqs[0].task_type.c_str());
+    warn_if_turbo_stem(ctx, "lego");
+    if (s.is_lego_region) {
+        resolve_repaint_quality(s);
+    }
+
+    const float * enc_audio = src_audio;
+    int           enc_len   = src_len;
+    if (s.is_lego_region) {
+        apply_outpainting_padding(reqs[0], src_audio, src_len, s, enc_audio, enc_len);
+    }
+
+    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (s.is_lego_region && !adjust_region_coords(s, src_len)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// extract: stem isolation from a full mix.
+static AceSynthJob * run_extract(AceSynth *         ctx,
+                                 const AceRequest * reqs,
+                                 const float *      src_audio,
+                                 int                src_len,
+                                 const float *      ref_audio,
+                                 int                ref_len,
+                                 int                batch_n,
+                                 bool (*cancel)(void *),
+                                 void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'extract' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job       = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s         = job->state;
+    s.use_source_context    = true;
+    std::string track_upper = prepare_track(s.rr.track, "Extract");
+    s.instruction_str       = dit_instr_extract(track_upper);
+    fprintf(stderr, "[Synth-Run] task=%s\n", reqs[0].task_type.c_str());
+    warn_if_turbo_stem(ctx, "extract");
+
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// complete: extend an isolated stem with more content.
+static AceSynthJob * run_complete(AceSynth *         ctx,
+                                  const AceRequest * reqs,
+                                  const float *      src_audio,
+                                  int                src_len,
+                                  const float *      ref_audio,
+                                  int                ref_len,
+                                  int                batch_n,
+                                  bool (*cancel)(void *),
+                                  void * cancel_data) {
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'complete' requires source audio\n");
+        return NULL;
+    }
+    AceSynthJob * job       = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s         = job->state;
+    s.use_source_context    = true;
+    std::string track_upper = prepare_track(s.rr.track, "Complete");
+    s.instruction_str       = dit_instr_complete(track_upper);
+    fprintf(stderr, "[Synth-Run] task=%s\n", reqs[0].task_type.c_str());
+    warn_if_turbo_stem(ctx, "complete");
+
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+        delete job;
+        return NULL;
+    }
+    if (run_tail(ctx, reqs, batch_n, s, cancel, cancel_data) != 0) {
+        delete job;
+        return NULL;
+    }
+    return job;
+}
+
+// Phase 1 entry point. Dispatches on reqs[0].task_type to the right task
+// function. task_type is always set: request_init defaults it to text2music,
+// the JSON parser ignores empty strings.
 AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     const AceRequest * reqs,
                                     const float *      src_audio,
@@ -117,255 +547,30 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
     if (!ctx || !reqs || batch_n < 1 || batch_n > 9) {
         return NULL;
     }
-
-    AceSynthJob * job = new AceSynthJob();
-    job->batch_n      = batch_n;
-
-    SynthState & s = job->state;
-    s.Oc           = ctx->Oc;
-    s.ctx_ch       = ctx->ctx_ch;
-    s.left_pad_sec = 0.0f;
-    debug_init(&s.dbg, ctx->params.dump_dir);
-
-    // Outpainting: pad src_audio with silence when region coordinates extend
-    // beyond source bounds. Padding happens before VAE encode so T_cover
-    // reflects the padded duration.
-    const float * enc_audio = src_audio;
-    int           enc_len   = src_len;
-    {
-        const std::string & tp = reqs[0].task_type;
-        bool                is_region_task =
-            (tp == TASK_REPAINT) || (tp == TASK_LEGO && reqs[0].repainting_end > reqs[0].repainting_start);
-        if (is_region_task && src_audio && src_len > 0) {
-            float src_dur  = (float) src_len / 48000.0f;
-            float rs_raw   = reqs[0].repainting_start;
-            float re_raw   = reqs[0].repainting_end;
-            float end_time = (re_raw < 0.0f) ? src_dur : re_raw;
-            float lpad     = (rs_raw < 0.0f) ? -rs_raw : 0.0f;
-            float rpad     = (end_time > src_dur) ? end_time - src_dur : 0.0f;
-
-            if (lpad > 0.0f || rpad > 0.0f) {
-                int lpad_s       = (int) (lpad * 48000.0f);
-                int rpad_s       = (int) (rpad * 48000.0f);
-                int padded_total = src_len + lpad_s + rpad_s;
-
-                s.padded_src.resize((size_t) padded_total * 2);
-                memset(s.padded_src.data(), 0, s.padded_src.size() * sizeof(float));
-                memcpy(s.padded_src.data() + (size_t) lpad_s * 2, src_audio, (size_t) src_len * 2 * sizeof(float));
-
-                s.left_pad_sec = lpad;
-                enc_audio      = s.padded_src.data();
-                enc_len        = padded_total;
-
-                fprintf(stderr, "[Outpaint] pad left=%.1fs right=%.1fs total=%.1fs\n", lpad, rpad,
-                        (float) padded_total / 48000.0f);
-            }
-        }
+    const std::string & task = reqs[0].task_type;
+    if (task == TASK_TEXT2MUSIC) {
+        return run_text2music(ctx, reqs, ref_audio, ref_len, batch_n, cancel, cancel_data);
     }
-
-    // Pin VAE-Enc across both audio encodes. ops_encode_src and
-    // ops_encode_timbre each take their own internal handle, the pin keeps
-    // refcount above zero between them so STRICT policy does not unload and
-    // reload the same weights. Releases at end of scope, before the DiT
-    // phase claims the GPU budget.
-    {
-        ModelHandle vae_pin(ctx->store, store_require_vae_enc(ctx->store, ctx->vae_enc_key));
-        if (!vae_pin.ptr) {
-            fprintf(stderr, "[Pipeline-Synth] FATAL: store_require_vae_enc (pin) failed\n");
-            delete job;
-            return NULL;
-        }
-
-        // VAE encode source audio (possibly padded for outpainting).
-        if (ops_encode_src(ctx, enc_audio, enc_len, s) != 0) {
-            delete job;
-            return NULL;
-        }
-
-        // Shared request, mode flags, use_source_context.
-        // Per-batch: caption, lyrics, metadata, audio_codes, and seed come from reqs[b].
-        // seed must be resolved (non-negative) before calling this function.
-        s.rr                 = reqs[0];
-        // task_type is the master. Empty = text2music.
-        s.task               = s.rr.task_type.empty() ? std::string(TASK_TEXT2MUSIC) : s.rr.task_type;
-        // only repaint uses region masking. complete uses full src context (Python behavior).
-        s.is_repaint         = (s.task == TASK_REPAINT);
-        // lego with valid rs/re = region-constrained: generate only in zone, full audio context
-        s.is_lego_region     = (s.task == TASK_LEGO && s.rr.repainting_end > s.rr.repainting_start);
-        s.rs                 = s.rr.repainting_start;
-        s.re                 = s.rr.repainting_end;
-        // use_source_context must be set before ops_resolve_T which uses it for T.
-        // Mode routing refines it per task; this first pass covers all source-context tasks.
-        s.use_source_context = (s.task == TASK_COVER || s.task == TASK_COVER_NOFSQ || s.task == TASK_REPAINT ||
-                                s.task == TASK_LEGO || s.task == TASK_EXTRACT || s.task == TASK_COMPLETE);
-        // non-cover encoding pass (for audio_cover_strength < 1.0 switching) always uses text2music.
-        s.nc_instruction_str = DIT_INSTR_TEXT2MUSIC;
-
-        // Resolve DiT params (steps, guidance, shift) and scan audio codes
-        if (ops_resolve_params(ctx, reqs, batch_n, s) != 0) {
-            delete job;
-            return NULL;
-        }
-
-        // Promote text2music to cover when codes present (Python _resolve_generate_music_task).
-        // DiT was trained with the cover instruction for codes guided generation.
-        if (s.task == TASK_TEXT2MUSIC && s.have_codes) {
-            s.task               = std::string(TASK_COVER);
-            s.use_source_context = true;
-        }
-
-        // Timestep schedule
-        ops_build_schedule(s);
-
-        // SDE mode: "sde" = stochastic re-noising at each step
-        s.use_sde = (s.rr.infer_method == "sde");
-
-        // Resolve latent frame count T
-        if (ops_resolve_T(ctx, s) != 0) {
-            delete job;
-            return NULL;
-        }
-
-        // Resolve repaint quality params from repaint_strength.
-        // Python: _resolve_repaint_config("balanced", strength).
-        // 0.0 = aggressive, 0.5 = balanced (default), 1.0 = conservative.
-        {
-            float rs = s.rr.repaint_strength;
-            if (rs < 0.0f) {
-                rs = 0.0f;
-            }
-            if (rs > 1.0f) {
-                rs = 1.0f;
-            }
-            float inv                  = 1.0f - rs;
-            s.repaint_injection_ratio  = inv;
-            s.repaint_crossfade_frames = (int) (25.0f * inv + 0.5f);
-            s.repaint_wav_cf_sec       = 0.05f * inv;
-            if (s.is_repaint || s.is_lego_region) {
-                fprintf(stderr,
-                        "[Synth-Run] repaint_strength=%.2f -> injection=%.2f, crossfade=%d frames, wav_cf=%.0fms\n", rs,
-                        s.repaint_injection_ratio, s.repaint_crossfade_frames, s.repaint_wav_cf_sec * 1000.0f);
-            }
-        }
-
-        // Mode routing: per-task instruction, use_source_context, validation.
-        //    All task knowledge lives here. Adding a mode = adding one branch.
-        //    Track name is UPPERCASE in instructions (matches Python task_utils.py).
-        {
-            std::string track_upper = s.rr.track;
-            for (char & ch : track_upper) {
-                ch = (char) toupper((unsigned char) ch);
-            }
-            if (s.task == TASK_TEXT2MUSIC) {
-                // silence context, no pre-encoding work needed
-                s.use_source_context = false;
-                s.instruction_str    = DIT_INSTR_TEXT2MUSIC;
-            } else if (s.task == TASK_COVER) {
-                s.use_source_context  = true;
-                s.instruction_str     = DIT_INSTR_COVER;
-                // save clean VAE latents before FSQ degrades them.
-                // the FSQ roundtrip only affects context conditioning;
-                // cover_noise_strength blending needs the original clean latents.
-                s.noise_blend_latents = s.cover_latents;
-                ops_fsq_roundtrip(ctx, s);  // FSQ degrades source latents, DiT diverges from original
-            } else if (s.task == TASK_COVER_NOFSQ) {
-                // cover without FSQ roundtrip: DiT works on clean VAE latents at 25Hz.
-                // produces remixes that stay close to the source structure and timbre.
-                // pass ref_audio = src_audio for best results.
-                s.use_source_context = true;
-                s.instruction_str    = DIT_INSTR_COVER;
-            } else if (s.task == TASK_REPAINT) {
-                s.use_source_context = true;
-                s.instruction_str    = DIT_INSTR_REPAINT;
-            } else if (s.task == TASK_LEGO) {
-                s.use_source_context      = true;
-                s.rr.audio_cover_strength = 1.0f;  // all DiT steps hear the backing track
-                s.instruction_str         = dit_instr_lego(track_upper);
-                validate_track_names(s.rr.track, "Lego");
-                fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-                if (ctx->meta->is_turbo) {
-                    fprintf(stderr, "[Synth-Run] WARNING: lego requires base model, turbo output incoherent\n");
-                }
-            } else if (s.task == TASK_EXTRACT) {
-                s.use_source_context      = true;
-                s.rr.audio_cover_strength = 1.0f;  // DiT sees the full mix
-                s.instruction_str         = dit_instr_extract(track_upper);
-                validate_track_names(s.rr.track, "Extract");
-                fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-                if (ctx->meta->is_turbo) {
-                    fprintf(stderr, "[Synth-Run] WARNING: extract requires base model, turbo output incoherent\n");
-                }
-            } else if (s.task == TASK_COMPLETE) {
-                s.use_source_context      = true;
-                s.rr.audio_cover_strength = 1.0f;  // DiT sees the full isolated stem
-                s.instruction_str         = dit_instr_complete(track_upper);
-                validate_track_names(s.rr.track, "Complete");
-                fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-                if (ctx->meta->is_turbo) {
-                    fprintf(stderr, "[Synth-Run] WARNING: complete requires base model, turbo output incoherent\n");
-                }
-            }
-            // validation: tasks that need source audio or codes
-            if (s.use_source_context && !s.have_cover && !s.have_codes) {
-                fprintf(stderr, "[Synth-Run] ERROR: task '%s' requires source audio or audio codes\n", s.task.c_str());
-                delete job;
-                return NULL;
-            }
-        }
-
-        // Region coordinate adjustment (repaint and lego_region share the same path).
-        // Shift rs/re into the padded reference frame. When no padding was applied,
-        // left_pad_sec is 0 and the arithmetic is a no-op.
-        // adjusted_start = repainting_start + left_padding_duration
-        if (s.is_repaint || s.is_lego_region) {
-            s.rs += s.left_pad_sec;
-            if (s.re < 0.0f) {
-                // sentinel: outpaint (start < 0) ends at source start, inpaint ends at source end
-                s.re = (s.rr.repainting_start < 0.0f) ? s.left_pad_sec : (float) src_len / 48000.0f + s.left_pad_sec;
-            } else {
-                s.re += s.left_pad_sec;
-            }
-            if (s.re <= s.rs) {
-                fprintf(stderr, "[Region] ERROR: end (%.1f) <= start (%.1f)\n", s.re, s.rs);
-                delete job;
-                return NULL;
-            }
-            fprintf(stderr, "[Region] %.1fs..%.1fs (canvas=%.1fs)\n", s.rs, s.re,
-                    (float) s.T_cover * 1920.0f / 48000.0f);
-        }
-
-        // Encode timbre from ref_audio (independent of task).
-        ops_encode_timbre(ctx, ref_audio, ref_len, s);
+    if (task == TASK_COVER) {
+        return run_cover(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
     }
-    // VAE-Enc released here: GPU budget free for DiT and VAE-Dec phases.
-
-    // Per-batch text + lyric encoding (main + optional non-cover pass)
-    if (ops_encode_text(ctx, reqs, batch_n, s) != 0) {
-        delete job;
-        return NULL;
+    if (task == TASK_COVER_NOFSQ) {
+        return run_cover_nofsq(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
     }
-
-    // Build DiT context [batch_n, T, ctx_ch] = src(64) | mask(64)
-    if (ops_build_context(ctx, reqs, batch_n, s) != 0) {
-        delete job;
-        return NULL;
+    if (task == TASK_REPAINT) {
+        return run_repaint(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
     }
-
-    // Silence context for audio_cover_strength switching (cover only)
-    ops_build_context_silence(ctx, batch_n, s);
-
-    // Noise tensor (Philox), cover noise blend, per_S, repaint_src buffer
-    ops_init_noise_and_repaint(ctx, reqs, batch_n, s);
-
-    // DiT denoising loop. ops_dit_generate acquires the DiT from the store for
-    // the duration of the loop and releases it on scope exit. Latents land in
-    // s.output and stay in job memory until phase 2 feeds them to the VAE.
-    if (ops_dit_generate(ctx, batch_n, s, cancel, cancel_data) != 0) {
-        delete job;
-        return NULL;
+    if (task == TASK_LEGO) {
+        return run_lego(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
     }
-
-    return job;
+    if (task == TASK_EXTRACT) {
+        return run_extract(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+    }
+    if (task == TASK_COMPLETE) {
+        return run_complete(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+    }
+    fprintf(stderr, "[Synth-Run] ERROR: unknown task_type '%s'\n", task.c_str());
+    return NULL;
 }
 
 // Phase 2: VAE decode all batch items and apply waveform splice for

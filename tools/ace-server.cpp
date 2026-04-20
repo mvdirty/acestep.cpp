@@ -440,66 +440,15 @@ static std::string resolve_name(const std::vector<ModelEntry> & bucket,
     return "";
 }
 
-// server-side routing fields parsed from JSON (not part of AceRequest)
-struct ServerFields {
-    std::string synth_model;
-    std::string lm_model;
-    std::string adapter;
-    float       adapter_scale;
-};
-
-static void parse_server_fields(const char * json, ServerFields * sf) {
-    sf->synth_model   = "";
-    sf->lm_model      = "";
-    sf->adapter       = "";
-    sf->adapter_scale = 1.0f;
-
-    yyjson_doc * doc = yyjson_read(json, strlen(json), 0);
-    if (!doc) {
-        return;
-    }
-    yyjson_val * root = yyjson_doc_get_root(doc);
-    if (!root) {
-        yyjson_doc_free(doc);
-        return;
-    }
-
-    // for arrays, take server fields from the first element
-    yyjson_val * obj = root;
-    if (yyjson_is_arr(root)) {
-        obj = yyjson_arr_get_first(root);
-    }
-    if (!obj || !yyjson_is_obj(obj)) {
-        yyjson_doc_free(doc);
-        return;
-    }
-
-    yyjson_val * v;
-    if ((v = yyjson_obj_get(obj, "synth_model")) && yyjson_is_str(v)) {
-        sf->synth_model = yyjson_get_str(v);
-    }
-    if ((v = yyjson_obj_get(obj, "lm_model")) && yyjson_is_str(v)) {
-        sf->lm_model = yyjson_get_str(v);
-    }
-    if ((v = yyjson_obj_get(obj, "adapter")) && yyjson_is_str(v)) {
-        sf->adapter = yyjson_get_str(v);
-    }
-    if ((v = yyjson_obj_get(obj, "adapter_scale")) && yyjson_is_num(v)) {
-        sf->adapter_scale = (float) yyjson_get_num(v);
-    }
-
-    yyjson_doc_free(doc);
-}
-
 // LM worker: generates metadata + lyrics + codes, stores JSON result in job.
-static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, ServerFields sf, int lm_batch_size, int mode) {
+static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch_size, int mode) {
     if (job->cancel.load()) {
         job->status.store(3);
         return;
     }
 
     // Resolve model name and build per-request params from the template.
-    std::string        lm_name = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
+    std::string        lm_name = resolve_name(g_registry.lm, ace_req.lm_model, g_loaded_lm);
     const ModelEntry * entry   = registry_find(g_registry.lm, lm_name.c_str());
     if (!entry) {
         fprintf(stderr, "[Server] LM not found: %s\n", lm_name.c_str());
@@ -559,8 +508,8 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, ServerFields
 // accepts: AceRequest JSON (+ optional "lm_model" for LM selection)
 // returns: JSON {"id":"N"} immediately. result is a JSON array of enriched
 // AceRequests (lm_batch_size controls count).
-// modes:
-//   (none)    full: metadata + lyrics + audio codes
+// modes (AceRequest.lm_mode):
+//   generate  full: metadata + lyrics + audio codes
 //   inspire   short caption -> metadata + lyrics (no codes)
 //   format    caption + lyrics -> metadata + lyrics (no codes)
 static void handle_lm(const httplib::Request & req, httplib::Response & res) {
@@ -569,24 +518,7 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
         return;
     }
 
-    // parse mode from URL parameter
-    int mode = LM_MODE_GENERATE;
-    if (req.has_param("mode")) {
-        std::string m = req.get_param_value("mode");
-        if (m == "inspire") {
-            mode = LM_MODE_INSPIRE;
-        } else if (m == "format") {
-            mode = LM_MODE_FORMAT;
-        } else {
-            json_error(res, 400, "Invalid mode (use: inspire, format)");
-            return;
-        }
-    }
-
-    // parse server fields + request
-    ServerFields sf;
-    parse_server_fields(req.body.c_str(), &sf);
-
+    // parse request
     AceRequest ace_req;
     if (!request_parse_json(&ace_req, req.body.c_str())) {
         json_error(res, 400, "Invalid JSON");
@@ -594,6 +526,19 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     }
     if (ace_req.caption.empty()) {
         json_error(res, 400, "Caption is required");
+        return;
+    }
+
+    // Resolve lm_mode string to integer mode used by ace_lm_generate.
+    int mode;
+    if (ace_req.lm_mode == LM_MODE_NAME_GENERATE) {
+        mode = LM_MODE_GENERATE;
+    } else if (ace_req.lm_mode == LM_MODE_NAME_INSPIRE) {
+        mode = LM_MODE_INSPIRE;
+    } else if (ace_req.lm_mode == LM_MODE_NAME_FORMAT) {
+        mode = LM_MODE_FORMAT;
+    } else {
+        json_error(res, 400, "Invalid lm_mode (use: generate, inspire, format)");
         return;
     }
 
@@ -609,7 +554,7 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (LM, mode=%d)\n", job->id.c_str(), mode);
 
-    work_push([job, ace_req, sf, lm_batch_size, mode]() { lm_worker(job, ace_req, sf, lm_batch_size, mode); });
+    work_push([job, ace_req, lm_batch_size, mode]() { lm_worker(job, ace_req, lm_batch_size, mode); });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
@@ -618,7 +563,6 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
 // synth worker: processes synth request, stores audio result in job.
 static void synth_worker(std::shared_ptr<Job>    job,
                          std::vector<AceRequest> ace_reqs,
-                         ServerFields            sf,
                          float *                 src_interleaved,
                          int                     src_len,
                          float *                 ref_interleaved,
@@ -645,7 +589,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     }
 
     // Resolve DiT, adapter and the text-encoder / VAE singletons.
-    std::string        dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    std::string        dit_name = resolve_name(g_registry.dit, ace_reqs[0].synth_model, g_loaded_dit);
     const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
     if (!dit) {
         fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
@@ -668,20 +612,20 @@ static void synth_worker(std::shared_ptr<Job>    job,
     p.vae_path          = g_registry.vae[0].path.c_str();
     p.adapter_path      = nullptr;
     p.adapter_scale     = 1.0f;
-    if (!sf.adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, sf.adapter.c_str());
+    if (!ace_reqs[0].adapter.empty()) {
+        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
         if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", sf.adapter.c_str());
+            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
             free(src_interleaved);
             free(ref_interleaved);
             job->status.store(2);
             return;
         }
         p.adapter_path  = adapter->path.c_str();
-        p.adapter_scale = sf.adapter_scale;
+        p.adapter_scale = ace_reqs[0].adapter_scale;
     }
     fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
-            sf.adapter.empty() ? "" : " Adapter=", sf.adapter.c_str());
+            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str());
 
     AceSynth * ctx = ace_synth_load(g_store, &p);
     if (!ctx) {
@@ -734,8 +678,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
     // them in the default mode since the ctx is gone; we match that behavior.
     if (g_keep_loaded) {
         g_loaded_dit           = dit_name;
-        g_loaded_adapter       = sf.adapter;
-        g_loaded_adapter_scale = sf.adapter_scale;
+        g_loaded_adapter       = ace_reqs[0].adapter;
+        g_loaded_adapter_scale = ace_reqs[0].adapter_scale;
     } else {
         g_loaded_dit.clear();
         g_loaded_adapter.clear();
@@ -809,10 +753,8 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         return;
     }
 
-    // parse server fields from JSON body (before multipart parsing)
-    ServerFields sf;
-
-    // parse request: plain JSON (single or array) or multipart (JSON + audio file)
+    // parse request: plain JSON (single or array) or multipart (JSON + audio file).
+    // synth_model, lm_model, adapter, adapter_scale travel inside AceRequest now.
     std::vector<AceRequest> ace_reqs;
     float *                 src_interleaved = nullptr;
     int                     src_len         = 0;
@@ -832,7 +774,6 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
             json_error(res, 400, "Multipart: missing 'request' part");
             return;
         }
-        parse_server_fields(json_body.c_str(), &sf);
         if (!request_parse_json(&ace_req, json_body.c_str())) {
             json_error(res, 400, "Multipart: invalid JSON in 'request' part");
             return;
@@ -875,7 +816,6 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         ace_reqs.push_back(ace_req);
     } else {
         // plain JSON body: single object {} or array [{}, ...]
-        parse_server_fields(req.body.c_str(), &sf);
         if (!request_parse_json_array(req.body.c_str(), &ace_reqs)) {
             json_error(res, 400, "Invalid JSON");
             return;
@@ -892,14 +832,17 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         return;
     }
 
-    // output format: ?format=wav16|wav24|wav32 for WAV, default MP3
+    // Output format from AceRequest.output_format. Converts the string to
+    // (output_wav, wav_fmt) using the same parser the CLI uses.
     bool      output_wav = false;
     WavFormat wav_fmt    = WAV_S16;
-    if (req.has_param("format")) {
+    {
         bool is_mp3 = true;
-        if (audio_parse_format(req.get_param_value("format").c_str(), is_mp3, wav_fmt)) {
-            output_wav = !is_mp3;
+        if (!audio_parse_format(ace_reqs[0].output_format.c_str(), is_mp3, wav_fmt)) {
+            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32)");
+            return;
         }
+        output_wav = !is_mp3;
     }
     int peak_clip = ace_reqs[0].peak_clip;
 
@@ -907,9 +850,9 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (%d requests)\n", job->id.c_str(), (int) ace_reqs.size());
 
-    work_push([job, reqs = std::move(ace_reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav,
-               wav_fmt, peak_clip]() mutable {
-        synth_worker(job, std::move(reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
+    work_push([job, reqs = std::move(ace_reqs), src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
+               peak_clip]() mutable {
+        synth_worker(job, std::move(reqs), src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
                      peak_clip);
     });
 
@@ -919,11 +862,7 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
 }
 
 // understand worker: load LM + tokenizer, run understand, store JSON result in job.
-static void understand_worker(std::shared_ptr<Job> job,
-                              AceRequest           ace_req,
-                              ServerFields         sf,
-                              float *              src_interleaved,
-                              int                  src_len) {
+static void understand_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * src_interleaved, int src_len) {
     if (job->cancel.load()) {
         free(src_interleaved);
         job->status.store(3);
@@ -931,8 +870,8 @@ static void understand_worker(std::shared_ptr<Job> job,
     }
 
     // Resolve LM + DiT (the DiT path carries the tokenizer weights).
-    std::string        lm_name  = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
-    std::string        dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    std::string        lm_name  = resolve_name(g_registry.lm, ace_req.lm_model, g_loaded_lm);
+    std::string        dit_name = resolve_name(g_registry.dit, ace_req.synth_model, g_loaded_dit);
     const ModelEntry * lm_entry = registry_find(g_registry.lm, lm_name.c_str());
     const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
     if (!lm_entry || !dit) {
@@ -982,11 +921,9 @@ static void understand_worker(std::shared_ptr<Job> job,
 }
 
 // POST /understand
-// Two modes:
-//   multipart/form-data          -> full pipeline (audio + optional JSON params)
-//     part "audio":   WAV or MP3 file (required)
-//     part "request": JSON text (optional, for sampling params)
-//   application/json body        -> codes-only (audio_codes in JSON, skip VAE+FSQ)
+// multipart/form-data: full pipeline (audio + optional JSON params)
+//   part "audio":   WAV or MP3 file (required)
+//   part "request": JSON text (optional, for model selection and sampling params)
 // returns: JSON {"id":"N"} immediately.
 static void handle_understand(const httplib::Request & req, httplib::Response & res) {
     if (g_registry.lm.empty() || g_registry.dit.empty() || g_registry.vae.empty()) {
@@ -994,74 +931,62 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         return;
     }
 
-    // parse request: multipart (audio + optional JSON) or plain JSON (codes-only)
+    if (!req.is_multipart_form_data()) {
+        json_error(res, 400, "Understand requires multipart/form-data");
+        return;
+    }
+
+    // parse multipart: required "audio" part, optional "request" part for sampling params.
+    // synth_model, lm_model, adapter, adapter_scale travel inside AceRequest.
     AceRequest ace_req;
     request_init(&ace_req);
     ace_req.lm_temperature = 0.3f;  // understand default: lower than generation
     ace_req.lm_top_p       = 1.0f;  // understand default: no nucleus sampling
 
-    // parse server fields + request
-    ServerFields sf;
-    float *      src_interleaved = nullptr;
-    int          src_len         = 0;
-
-    if (req.is_multipart_form_data()) {
-        // multipart: required "audio" part, optional "request" part for sampling params
-        if (req.form.has_file("request")) {
-            const std::string & json = req.form.get_file("request").content;
-            parse_server_fields(json.c_str(), &sf);
-            if (!request_parse_json(&ace_req, json.c_str())) {
-                json_error(res, 400, "Multipart: invalid JSON in 'request' part");
-                return;
-            }
-        } else if (req.form.has_field("request")) {
-            const std::string & json = req.form.get_field("request");
-            parse_server_fields(json.c_str(), &sf);
-            if (!request_parse_json(&ace_req, json.c_str())) {
-                json_error(res, 400, "Multipart: invalid JSON in 'request' part");
-                return;
-            }
-        }
-
-        if (!req.form.has_file("audio")) {
-            json_error(res, 400, "Multipart: missing 'audio' part");
+    if (req.form.has_file("request")) {
+        const std::string & json = req.form.get_file("request").content;
+        if (!request_parse_json(&ace_req, json.c_str())) {
+            json_error(res, 400, "Multipart: invalid JSON in 'request' part");
             return;
         }
-        auto file = req.form.get_file("audio");
-        if (file.content.empty()) {
-            json_error(res, 400, "Multipart: empty 'audio' part");
-            return;
-        }
-
-        // decode directly from multipart buffer (WAV/MP3 auto-detected)
-        int     T_audio = 0;
-        float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
-        if (!planar || T_audio <= 0) {
-            json_error(res, 400, "Failed to decode audio");
-            return;
-        }
-
-        fprintf(stderr, "[Server] Understand source: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
-
-        // convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...] for pipeline
-        src_interleaved = audio_planar_to_interleaved(planar, T_audio);
-        free(planar);
-        src_len = T_audio;
-    } else {
-        // plain JSON body: codes-only mode
-        parse_server_fields(req.body.c_str(), &sf);
-        if (!request_parse_json(&ace_req, req.body.c_str())) {
-            json_error(res, 400, "Invalid JSON");
+    } else if (req.form.has_field("request")) {
+        const std::string & json = req.form.get_field("request");
+        if (!request_parse_json(&ace_req, json.c_str())) {
+            json_error(res, 400, "Multipart: invalid JSON in 'request' part");
             return;
         }
     }
 
+    if (!req.form.has_file("audio")) {
+        json_error(res, 400, "Multipart: missing 'audio' part");
+        return;
+    }
+    auto file = req.form.get_file("audio");
+    if (file.content.empty()) {
+        json_error(res, 400, "Multipart: empty 'audio' part");
+        return;
+    }
+
+    // decode directly from multipart buffer (WAV/MP3 auto-detected)
+    int     T_audio = 0;
+    float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
+    if (!planar || T_audio <= 0) {
+        json_error(res, 400, "Failed to decode audio");
+        return;
+    }
+
+    fprintf(stderr, "[Server] Understand source: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
+
+    // convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...] for pipeline
+    float * src_interleaved = audio_planar_to_interleaved(planar, T_audio);
+    free(planar);
+    int src_len = T_audio;
+
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (understand)\n", job->id.c_str());
 
-    work_push([job, ace_req, sf, src_interleaved, src_len]() {
-        understand_worker(job, ace_req, sf, src_interleaved, src_len);
-    });
+    work_push(
+        [job, ace_req, src_interleaved, src_len]() { understand_worker(job, ace_req, src_interleaved, src_len); });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");

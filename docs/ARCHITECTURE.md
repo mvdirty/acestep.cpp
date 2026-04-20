@@ -173,35 +173,33 @@ EOF
 
 # LLM: request.json -> request0.json (enriched with metadata + lyrics + codes)
 ./ace-lm \
-    --request /tmp/request.json \
-    --lm models/acestep-5Hz-lm-4B-Q8_0.gguf
+    --models models \
+    --request /tmp/request.json
 
 # DiT+VAE: request0.json -> request00.mp3
 ./ace-synth \
-    --request /tmp/request0.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf
+    --models models \
+    --request /tmp/request0.json
 ```
 
-With an adapter (LoRA today, PEFT directory or ComfyUI single file):
+With an adapter (LoRA today, PEFT directory or ComfyUI single file), set
+`adapter` in the JSON and point `--adapters` at a directory that contains it:
 
 ```bash
-# PEFT directory (contains adapter_model.safetensors + adapter_config.json)
-./ace-synth \
-    --request /tmp/request0.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf \
-    --adapter /path/to/peft-adapter
+# JSON carries the adapter name, CLI passes the directory
+cat > /tmp/request.json << 'EOF'
+{
+    "caption": "Upbeat pop rock with driving guitars and catchy hooks",
+    "adapter": "best_sft_v2_2338_comfyui.safetensors",
+    "adapter_scale": 1.0,
+    "vocal_language": "fr"
+}
+EOF
 
-# ComfyUI single .safetensors file (alpha baked in, no config needed)
 ./ace-synth \
-    --request /tmp/request0.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf \
-    --adapter best_sft_v2_2338_comfyui.safetensors
+    --models models \
+    --adapters adapters \
+    --request /tmp/request0.json
 ```
 
 Generate multiple songs at once with `lm_batch_size` in the JSON:
@@ -218,15 +216,13 @@ EOF
 
 # LM: request.json (lm_batch_size=2) -> request0.json, request1.json
 ./ace-lm \
-    --request /tmp/request.json \
-    --lm models/acestep-5Hz-lm-4B-Q8_0.gguf
+    --models models \
+    --request /tmp/request.json
 
 # DiT+VAE: both requests in one GPU batch -> request00.mp3, request10.mp3
 ./ace-synth \
-    --request /tmp/request0.json /tmp/request1.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf
+    --models models \
+    --request /tmp/request0.json /tmp/request1.json
 ```
 
 `lm_batch_size` controls how many songs the LM generates. User-provided
@@ -247,11 +243,9 @@ cat > /tmp/cover.json << 'EOF'
 EOF
 
 ./ace-synth \
+    --models models \
     --src-audio song.wav \
-    --request /tmp/cover.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-turbo-Q8_0.gguf \
-    --vae models/vae-BF16.gguf \
+    --request /tmp/cover.json
 ```
 
 Ready-made examples in `examples/`:
@@ -263,6 +257,7 @@ cd examples
 ./partial.sh                   # caption + lyrics + duration
 ./full.sh                      # all metadata provided
 ./dit-only.sh                  # skip LLM, DiT from noise
+./ace-understand.sh <audio>    # audio : understand : SFT DiT : MP3 roundtrip
 ./server-turbo.sh              # start HTTP server (turbo model)
 ./server-sft.sh                # start HTTP server (SFT model)
 ./client.sh                    # test server (single song)
@@ -363,24 +358,24 @@ cat > /tmp/outpaint.json << 'EOF'
 EOF
 
 ./ace-synth \
+    --models models \
     --src-audio song.wav \
-    --request /tmp/repaint.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-sft-Q8_0.gguf \
-    --vae models/vae-BF16.gguf
+    --request /tmp/repaint.json
 ```
 
 **Lego** (`"task_type": "lego"` + `--src-audio`):
 generates a new instrument track layered over an existing backing track.
-See `examples/lego.json` and `examples/lego.sh`.
+Requires the `acestep-v15-base` DiT (turbo and SFT do not support lego).
 
 ```bash
 cat > /tmp/lego.json << 'EOF'
 {
+    "synth_model": "acestep-v15-base-Q8_0.gguf",
     "caption": "electric guitar riff, funk guitar, house music, instrumental",
     "lyrics": "[Instrumental]",
     "task_type": "lego",
     "track": "guitar",
+    "output_format": "wav16",
     "inference_steps": 50,
     "guidance_scale": 1.0,
     "shift": 1.0
@@ -388,12 +383,9 @@ cat > /tmp/lego.json << 'EOF'
 EOF
 
 ./ace-synth \
+    --models models \
     --src-audio backing-track.wav \
-    --request /tmp/lego.json \
-    --embedding models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit models/acestep-v15-base-Q8_0.gguf \
-    --vae models/vae-BF16.gguf \
-    --wav
+    --request /tmp/lego.json
 ```
 
 Available track names for lego, extract, and complete: `vocals`, `backing_vocals`,
@@ -476,8 +468,10 @@ require a base or SFT model (not turbo).
 
 ## Request JSON reference
 
-Only `caption` is required. All other fields default to "unset" which means
-the LLM fills them, or a sensible runtime default is applied.
+Every field below has a default. Omitting a field from the JSON is strictly
+equivalent to sending that field with its default value. Only `caption` is
+effectively required: the other defaults produce a valid text2music job on
+their own, but without caption the LLM has nothing to work from.
 
 ```json
 {
@@ -505,15 +499,32 @@ the LLM fills them, or a sensible runtime default is applied.
     "cover_noise_strength": 0.0,
     "repainting_start":     0,
     "repainting_end":       -1,
-    "task_type":            "",
+    "repaint_strength":     0.5,
+    "task_type":            "text2music",
     "track":                "",
-    "infer_method":         "",
+    "infer_method":         "ode",
+    "lm_mode":              "generate",
+    "output_format":        "mp3",
+    "peak_clip":            10,
     "synth_model":          "",
     "lm_model":             "",
     "adapter":              "",
     "adapter_scale":        1.0
 }
 ```
+
+`synth_model`, `lm_model` and `adapter` are resolved through the model
+registry, scanned from `--models <dir>` (and `--adapters <dir>` for
+adapters), by both the HTTP server and the CLI binaries (`ace-lm`,
+`ace-synth`, `ace-understand`). Values are GGUF filenames without the
+`.gguf` suffix; an empty string falls to the first matching entry of the
+registry. There is no CLI flag to bypass the JSON: model selection is a
+property of the request, not of the command line.
+
+`lm_mode` picks the LM instruction: `"generate"` (full: metadata + lyrics
++ codes), `"inspire"` (short query to metadata + lyrics, no codes),
+`"format"` (caption + lyrics to metadata + lyrics, no codes). `output_format`
+picks the audio encoder: `"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`.
 
 ### Text conditioning (ace-lm + ace-synth)
 
@@ -605,9 +616,9 @@ to source start when outpainting (start < 0), source duration otherwise.
 Negative start pads silence before, end beyond source duration pads after.
 Error if end <= start after adjustment.
 
-**`task_type`** (string, default `""` = `text2music`)
+**`task_type`** (string, default `"text2music"`)
 Controls the generation mode. This field is the single source of truth for
-what the pipeline does. Empty is equivalent to `text2music`.
+what the pipeline does and is always serialized in request round trips.
 Values: `text2music`, `cover`, `cover-nofsq`, `repaint`, `lego`, `extract`, `complete`.
 
 - `text2music`: standard text-to-music synthesis from silence.
@@ -708,8 +719,8 @@ Flow-matching schedule shift. Controls the timestep distribution.
 `shift = s*t / (1 + (s-1)*t)`. `0.0` resolves from the loaded model:
 turbo = `3.0`, base/SFT = `1.0`.
 
-**`infer_method`** (string, default `""` = ODE Euler)
-Diffusion solver. `""` or `"ode"` uses ODE Euler (one model eval per step,
+**`infer_method`** (string, default `"ode"`)
+Diffusion solver. `"ode"` uses ODE Euler (one model eval per step,
 same seed always gives same result). `"sde"` uses SDE Stochastic (predicts x0
 then re-noises with fresh Philox noise at each step, producing varied results
 across different trajectories). SDE is reproducible: the per-step noise is
@@ -721,11 +732,11 @@ Base/SFT preset: `inference_steps=50, guidance_scale=1.0, shift=1.0`.
 ## ace-lm reference
 
 ```
-Usage: ./ace-lm --request <json> --lm <gguf> [options]
+Usage: ./ace-lm --models <dir> --request <json> [options]
 
 Required:
-  --request <json>       Input request JSON
-  --lm <gguf>            5Hz LM GGUF file
+  --models <dir>         Directory of GGUF model files
+  --request <json>       Input request JSON (carries lm_model)
 
 Debug:
   --max-seq <N>          KV cache size (default: 8192)
@@ -737,7 +748,10 @@ Debug:
   --dump-tokens <path>   Dump prompt token IDs (CSV)
 ```
 
-Three LLM sizes: 0.6B (fast), 1.7B, 4B (best quality).
+The LM is picked from the request JSON via `lm_model`; empty value falls
+to the first LM in the registry. `lm_mode` in the JSON selects the
+instruction (generate, inspire, format). Three LM sizes: 0.6B (fast),
+1.7B, 4B (best quality).
 
 Batching is controlled by `lm_batch_size` in the request JSON (default 1).
 Model weights are read once per decode step for all N sequences.
@@ -745,24 +759,18 @@ Model weights are read once per decode step for all N sequences.
 ## ace-synth reference
 
 ```
-Usage: ./ace-synth --request <json...> --embedding <gguf> --dit <gguf> --vae <gguf> [options]
+Usage: ./ace-synth --models <dir> --request <json...> [options]
 
 Required:
+  --models <dir>          Directory of GGUF model files
   --request <json...>     One or more request JSONs (from ace-lm --request)
-  --embedding <gguf>      Embedding GGUF file
-  --dit <gguf>            DiT GGUF file
-  --vae <gguf>            VAE GGUF file
 
-Audio:
+Optional:
+  --adapters <dir>        Directory of adapter files (enables JSON adapter field)
   --src-audio <file>      Source audio (WAV or MP3)
   --ref-audio <file>      Timbre reference audio (WAV or MP3)
 
-Adapter:
-  --adapter <path>        Adapter safetensors file or PEFT directory
-  --adapter-scale <float> Adapter scaling factor (default: 1.0)
-
-Output:
-  --format <fmt>          Output format: mp3, wav16, wav24, wav32 (default: mp3)
+Audio encoding:
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
 
 Memory control:
@@ -776,15 +784,20 @@ Debug:
   --dump <dir>            Dump intermediate tensors
 ```
 
+Model selection comes from the first request JSON. `synth_model` picks
+the DiT from the registry, `adapter` picks an adapter from `--adapters`,
+`output_format` picks the output encoder (mp3, wav16, wav24, wav32). When
+`synth_model` is empty the first DiT in the registry is used; the text
+encoder and the VAE are always the first in their respective buckets.
 Models are loaded once and reused across all requests.
 
-When `--adapter` is provided, deltas are merged into the DiT projection
-weights at load time (before QKV fusion and GPU upload). For LoRA, the
-safetensors file is parsed directly, each lora_A/lora_B pair is multiplied
+When `adapter` is set, deltas are merged into the DiT projection weights
+at load time (before QKV fusion and GPU upload). For LoRA, the safetensors
+file is parsed directly, each lora_A/lora_B pair is multiplied
 (`alpha/rank * scale * B @ A`), and the result is added to the base weight
 in F32 before requantizing back to the original GGUF type. This is a
 static merge: inference runs at full speed with no adapter overhead.
-`--adapter` accepts either a safetensors file or a directory containing
+The registry accepts either a safetensors file or a directory containing
 `adapter_model.safetensors` and `adapter_config.json` (PEFT format).
 
 `--src-audio` provides source content for cover, repaint, lego, extract and
@@ -892,20 +905,16 @@ Examples:
 
 ```
 POST /lm                        Submit LM generation, returns job ID
-POST /lm?mode=inspire           Submit inspire generation, returns job ID
-POST /lm?mode=format            Submit format generation, returns job ID
   body: application/json AceRequest
   response: {"id":"1"}
 
-POST /synth                     Submit synth generation (MP3), returns job ID
-POST /synth?wav=1               Submit synth generation (WAV), returns job ID
+POST /synth                     Submit synth generation, returns job ID
   body: application/json AceRequest or [AceRequest, ...]
   body: multipart/form-data (request + audio + ref_audio)
   response: {"id":"2"}
 
 POST /understand                Submit understand, returns job ID
-  body: multipart/form-data (audio + optional request)
-  body: application/json (codes only mode)
+  body: multipart/form-data (audio required, optional request JSON)
   response: {"id":"3"}
 
 GET  /job?id=N                  Poll job status
@@ -932,9 +941,12 @@ GET  /                          Embedded WebUI (gzipped HTML)
 ```
 
 `lm_model`, `synth_model`, `adapter`, `adapter_scale` fields in the JSON body
-select which model and adapter to load. `synth_batch_size` duplicates a
-request for multiple DiT variations (clamped to 9). Error responses are
-JSON: `{"error":"message"}` with 400, 500, 501, or 503 status.
+select which model and adapter to load. `lm_mode` picks the LM instruction
+(`"generate"`, `"inspire"`, `"format"`); `output_format` picks the audio
+encoder for `/synth` (`"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`).
+`synth_batch_size` duplicates a request for multiple DiT variations
+(clamped to 9). Error responses are JSON: `{"error":"message"}` with 400,
+500, 501, or 503 status.
 
 **GET /props** returns available models, server configuration, and the
 default AceRequest (source of truth for webui dropdowns and placeholders):
@@ -1066,32 +1078,23 @@ Examples:
 
 ## ace-understand reference
 
-Reverse pipeline: audio (or pre-existing audio codes) -> LM understand ->
+Reverse pipeline: audio -> VAE encode -> FSQ tokenize -> LM understand ->
 metadata + lyrics. The output JSON is reusable as ace-lm or ace-synth input.
 
-Two input modes: `--src-audio` runs the full chain (VAE encode + FSQ tokenize +
-LM), `--request` with an `audio_codes` field skips straight to the LM.
-
 ```
-Usage: ./ace-understand [--src-audio <file> --dit <gguf> --vae <gguf> | --request <json>] --lm <gguf>
-
-Audio input (full pipeline):
-  --src-audio <file>      Source audio (WAV or MP3, any sample rate)
-  --dit <gguf>            DiT GGUF (for FSQ tokenizer weights + silence_latent)
-  --vae <gguf>            VAE GGUF (for audio encoding)
-
-Code input (skip VAE + tokenizer):
-  --request <json>        Request JSON with audio_codes field
+Usage: ./ace-understand --models <dir> --src-audio <file> [--request <json>] [options]
 
 Required:
-  --lm <gguf>             5Hz LM GGUF file
+  --models <dir>          Directory of GGUF model files
+  --src-audio <file>      Source audio (WAV or MP3, any sample rate)
+
+Optional:
+  --request <json>        Request JSON carrying model selection and sampling
+                          params (lm_model, synth_model, lm_temperature,
+                          lm_top_p, lm_top_k)
 
 Output:
   -o <json>               Output JSON (default: stdout summary)
-
-Sampling params (lm_temperature, lm_top_p, lm_top_k) come from the
-request JSON. Without --request, understand defaults apply
-(temperature=0.3, top_p disabled).
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 1024)
@@ -1103,6 +1106,11 @@ Debug:
   --no-fa                 Disable flash attention
   --dump <dir>            Dump tok_latents + tok_codes (skip LM)
 ```
+
+Model selection comes from the request JSON (`lm_model`, `synth_model`);
+when unset, the first LM and the first DiT in the registry are used, and
+the VAE is always the first in the registry. Without `--request`,
+understand defaults apply (temperature 0.3, top_p disabled).
 
 ## Architecture
 

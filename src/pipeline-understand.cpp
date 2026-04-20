@@ -29,35 +29,12 @@
 #include <unordered_map>
 #include <vector>
 
-// Parse comma-separated codes string "3101,11837,27514,..." into vector
-static std::vector<int> parse_codes_string(const std::string & s) {
-    std::vector<int> codes;
-    if (s.empty()) {
-        return codes;
-    }
-    const char * p = s.c_str();
-    while (*p) {
-        while (*p == ',' || *p == ' ') {
-            p++;
-        }
-        if (!*p) {
-            break;
-        }
-        codes.push_back(atoi(p));
-        while (*p && *p != ',') {
-            p++;
-        }
-    }
-    return codes;
-}
-
 struct AceUnderstand {
     ModelStore *        store;
     AceUnderstandParams params;
 
-    // Feature flags derived from provided paths.
-    bool have_audio;  // vae_path + dit_path present: full audio-in mode
-    bool have_lm;     // model_path present: run the understand LM
+    // LM is optional: dump_dir set + no model_path means tok-only (FSQ debug).
+    bool have_lm;
 
     ModelKey lm_key;
     ModelKey vae_enc_key;
@@ -86,20 +63,21 @@ AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParam
         fprintf(stderr, "[Understand-Load] ERROR: model_path required (or dump_dir for tok-only)\n");
         return NULL;
     }
-
-    auto * ctx      = new AceUnderstand();
-    ctx->store      = store;
-    ctx->params     = *params;
-    ctx->have_audio = params->vae_path && params->dit_path;
-    ctx->have_lm    = params->model_path != NULL;
-
-    if (ctx->have_audio) {
-        ctx->vae_enc_key.kind = MODEL_VAE_ENC;
-        ctx->vae_enc_key.path = params->vae_path;
-
-        ctx->fsq_tok_key.kind = MODEL_FSQ_TOK;
-        ctx->fsq_tok_key.path = params->dit_path;
+    if (!params->vae_path || !params->dit_path) {
+        fprintf(stderr, "[Understand-Load] ERROR: vae_path and dit_path are required\n");
+        return NULL;
     }
+
+    auto * ctx   = new AceUnderstand();
+    ctx->store   = store;
+    ctx->params  = *params;
+    ctx->have_lm = params->model_path != NULL;
+
+    ctx->vae_enc_key.kind = MODEL_VAE_ENC;
+    ctx->vae_enc_key.path = params->vae_path;
+
+    ctx->fsq_tok_key.kind = MODEL_FSQ_TOK;
+    ctx->fsq_tok_key.path = params->dit_path;
 
     if (ctx->have_lm) {
         // LM key MUST stay identical to the one ace_lm builds, so the store
@@ -112,8 +90,8 @@ AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParam
         ctx->lm_key.n_kv_sets = 2 * params->max_batch;
     }
 
-    fprintf(stderr, "[Understand-Load] Ready: audio=%s, lm=%s, fa=%s, fsm=%s\n", ctx->have_audio ? "yes" : "no",
-            ctx->have_lm ? "yes" : "no", params->use_fa ? "yes" : "no", params->use_fsm ? "yes" : "no");
+    fprintf(stderr, "[Understand-Load] Ready: lm=%s, fa=%s, fsm=%s\n", ctx->have_lm ? "yes" : "no",
+            params->use_fa ? "yes" : "no", params->use_fsm ? "yes" : "no");
     return ctx;
 }
 
@@ -141,91 +119,78 @@ int ace_understand_generate(AceUnderstand *    ctx,
 
     std::vector<int> codes;
 
-    // Step 1: get audio codes
-    // src_audio provided: full pipeline (VAE encode + FSQ tokenize)
-    // no src_audio, audio_codes in request: parse from JSON
-    // src_audio + request: audio from caller, params from JSON
-    if (src_audio && src_len > 0) {
-        if (!ctx->have_audio) {
-            fprintf(stderr, "[Understand] ERROR: audio input requires VAE + DiT models\n");
-            return -1;
-        }
+    // Step 1: audio -> latents -> codes (VAE encode + FSQ tokenize).
+    if (!src_audio || src_len <= 0) {
+        fprintf(stderr, "[Understand] ERROR: src_audio is required\n");
+        return -1;
+    }
 
-        // VAE encode: audio -> latents [T_25Hz, 64]. VAE-Enc lives only for
-        // this step: acquire, encode, release so the store can free it before
-        // the tokenizer comes in (STRICT) or keep it resident (NEVER).
-        Timer              t_vae;
-        int                max_T_lat = (src_len / 1920) + 64;
-        std::vector<float> latents((size_t) max_T_lat * 64);
+    // VAE encode: audio -> latents [T_25Hz, 64]. VAE-Enc lives only for
+    // this step: acquire, encode, release so the store can free it before
+    // the tokenizer comes in (STRICT) or keep it resident (NEVER).
+    Timer              t_vae;
+    int                max_T_lat = (src_len / 1920) + 64;
+    std::vector<float> latents((size_t) max_T_lat * 64);
 
-        VAEEncoder * vae_enc = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
-        if (!vae_enc) {
-            fprintf(stderr, "[Understand-VAE] FATAL: store_require_vae_enc failed\n");
-            return -1;
-        }
-        int T_25Hz;
-        {
-            ModelHandle vae_guard(ctx->store, vae_enc);
-            T_25Hz = vae_enc_encode_tiled(vae_enc, src_audio, src_len, latents.data(), max_T_lat, ctx->params.vae_chunk,
-                                          ctx->params.vae_overlap);
-        }
-        if (T_25Hz < 0) {
-            fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
-            return -1;
-        }
-        fprintf(stderr, "[Understand-VAE] Encoded: %d latent frames (%.2fs), %.0fms\n", T_25Hz,
-                (float) T_25Hz * 1920.0f / 48000.0f, t_vae.ms());
+    VAEEncoder * vae_enc = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
+    if (!vae_enc) {
+        fprintf(stderr, "[Understand-VAE] FATAL: store_require_vae_enc failed\n");
+        return -1;
+    }
+    int T_25Hz;
+    {
+        ModelHandle vae_guard(ctx->store, vae_enc);
+        T_25Hz = vae_enc_encode_tiled(vae_enc, src_audio, src_len, latents.data(), max_T_lat, ctx->params.vae_chunk,
+                                      ctx->params.vae_overlap);
+    }
+    if (T_25Hz < 0) {
+        fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
+        return -1;
+    }
+    fprintf(stderr, "[Understand-VAE] Encoded: %d latent frames (%.2fs), %.0fms\n", T_25Hz,
+            (float) T_25Hz * 1920.0f / 48000.0f, t_vae.ms());
 
-        // FSQ tokenize: latents [T_25Hz, 64] -> codes [T_5Hz].
-        // silence comes from the store's CPU cache of the DiT GGUF.
-        const float * silence = store_silence(ctx->store, ctx->params.dit_path);
-        if (!silence) {
-            fprintf(stderr, "[Understand-Tok] FATAL: silence_latent unavailable\n");
-            return -1;
-        }
+    // FSQ tokenize: latents [T_25Hz, 64] -> codes [T_5Hz].
+    // silence comes from the store's CPU cache of the DiT GGUF.
+    const float * silence = store_silence(ctx->store, ctx->params.dit_path);
+    if (!silence) {
+        fprintf(stderr, "[Understand-Tok] FATAL: silence_latent unavailable\n");
+        return -1;
+    }
 
-        Timer t_tok;
-        int   max_codes = (T_25Hz + 4) / 5;
-        codes.resize(max_codes);
-        TokGGML * fsq = store_require_fsq_tok(ctx->store, ctx->fsq_tok_key);
-        if (!fsq) {
-            fprintf(stderr, "[Understand-Tok] FATAL: store_require_fsq_tok failed\n");
-            return -1;
-        }
-        int T_5Hz;
-        {
-            ModelHandle fsq_guard(ctx->store, fsq);
-            T_5Hz = tok_ggml_encode(fsq, latents.data(), T_25Hz, codes.data(), silence);
-        }
-        if (T_5Hz < 0) {
-            fprintf(stderr, "[Understand-Tok] FATAL: tokenize failed\n");
-            return -1;
-        }
-        codes.resize(T_5Hz);
-        fprintf(stderr, "[Understand-Tok] %d codes (%.2fs @ 5Hz), %.0fms\n", T_5Hz, (float) T_5Hz / 5.0f, t_tok.ms());
+    Timer t_tok;
+    int   max_codes = (T_25Hz + 4) / 5;
+    codes.resize(max_codes);
+    TokGGML * fsq = store_require_fsq_tok(ctx->store, ctx->fsq_tok_key);
+    if (!fsq) {
+        fprintf(stderr, "[Understand-Tok] FATAL: store_require_fsq_tok failed\n");
+        return -1;
+    }
+    int T_5Hz;
+    {
+        ModelHandle fsq_guard(ctx->store, fsq);
+        T_5Hz = tok_ggml_encode(fsq, latents.data(), T_25Hz, codes.data(), silence);
+    }
+    if (T_5Hz < 0) {
+        fprintf(stderr, "[Understand-Tok] FATAL: tokenize failed\n");
+        return -1;
+    }
+    codes.resize(T_5Hz);
+    fprintf(stderr, "[Understand-Tok] %d codes (%.2fs @ 5Hz), %.0fms\n", T_5Hz, (float) T_5Hz / 5.0f, t_tok.ms());
 
-        // dump: save latents and codes for test-tok-cossim.py
-        if (ctx->params.dump_dir) {
-            DebugDumper dbg;
-            debug_init(&dbg, ctx->params.dump_dir);
-            debug_dump_2d(&dbg, "tok_latents", latents.data(), T_25Hz, 64);
-            char cpath[1024];
-            snprintf(cpath, sizeof(cpath), "%s/tok_codes.bin", ctx->params.dump_dir);
-            FILE * fc = fopen(cpath, "wb");
-            if (fc) {
-                fwrite(codes.data(), sizeof(int), (size_t) T_5Hz, fc);
-                fclose(fc);
-                fprintf(stderr, "[Understand-Debug] tok_codes: [%d] int32\n", T_5Hz);
-            }
+    // dump: save latents and codes for test-tok-cossim.py
+    if (ctx->params.dump_dir) {
+        DebugDumper dbg;
+        debug_init(&dbg, ctx->params.dump_dir);
+        debug_dump_2d(&dbg, "tok_latents", latents.data(), T_25Hz, 64);
+        char cpath[1024];
+        snprintf(cpath, sizeof(cpath), "%s/tok_codes.bin", ctx->params.dump_dir);
+        FILE * fc = fopen(cpath, "wb");
+        if (fc) {
+            fwrite(codes.data(), sizeof(int), (size_t) T_5Hz, fc);
+            fclose(fc);
+            fprintf(stderr, "[Understand-Debug] tok_codes: [%d] int32\n", T_5Hz);
         }
-    } else {
-        // Codes from JSON: parse audio_codes string "3101,11837,..."
-        codes = parse_codes_string(req->audio_codes);
-        if (codes.empty()) {
-            fprintf(stderr, "[Understand] ERROR: no audio and no audio_codes\n");
-            return -1;
-        }
-        fprintf(stderr, "[Understand] %zu codes from request\n", codes.size());
     }
 
     // dump-only mode (no LM loaded): return codes and exit
@@ -401,12 +366,6 @@ int ace_understand_generate(AceUnderstand *    ctx,
     }
     out->audio_codes = codes_str;
     fprintf(stderr, "[Understand-Result] audio_codes: %zu codes\n", codes.size());
-
-    // DiT sampling params: 0 = auto-detect from the DiT model at synth time.
-    // understand does not know which DiT the user will synthesize with.
-    out->inference_steps = 0;
-    out->shift           = 0.0f;
-    out->guidance_scale  = 0.0f;
 
     fprintf(stderr, "[Understand] Total %.0fms | seed=%u\n", t_total.ms(), seed);
     return 0;

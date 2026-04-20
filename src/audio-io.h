@@ -372,8 +372,9 @@ enum WavFormat {
     WAV_F32,  // 32-bit IEEE 754 float (classic RIFF, fmt_tag=3)
 };
 
-// Parse --format value into container type and WAV subformat.
-// Accepts: mp3, wav, wav16, wav24, wav32. Returns false on unknown format.
+// Parse the JSON output_format string into container type and WAV subformat.
+// Accepts: mp3, wav16, wav24, wav32. Returns false on unknown format.
+// Also accepts NULL and "mp3" as default (is_mp3 = true).
 static bool audio_parse_format(const char * s, bool & is_mp3, WavFormat & wav_fmt) {
     if (!s || !strcmp(s, "mp3")) {
         is_mp3 = true;

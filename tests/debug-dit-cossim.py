@@ -116,27 +116,34 @@ def run_ggml(dump_dir, req, cfg, gguf_path, adapter_dir=None):
         return False
     os.makedirs(dump_dir, exist_ok=True)
 
-    # Build request from input, override mode-specific params
+    # Build request from input, override mode-specific params.
+    # Model selection travels inside the JSON: synth_model is the GGUF filename,
+    # adapter (if any) is the adapter file or PEFT directory name under its parent.
     merged = dict(req)
     merged["seed"] = SEED
     merged["inference_steps"] = cfg["steps"]
     merged["guidance_scale"] = cfg["guidance"]
     merged["shift"] = cfg["shift"]
     merged["thinking"] = False
+    merged["synth_model"] = os.path.basename(gguf_path)
+
+    adapters_root = None
+    if adapter_dir:
+        adapters_root = os.path.dirname(os.path.abspath(adapter_dir)) or "."
+        merged["adapter"] = os.path.basename(os.path.normpath(adapter_dir))
+
     request_json = os.path.join(dump_dir, "request0.json")
     with open(request_json, "w") as f:
         json.dump(merged, f, indent=4)
 
-    cmd = [
-        ggml_bin,
-        "--dit", gguf_path,
-        "--embedding", "../models/Qwen3-Embedding-0.6B-BF16.gguf",
-        "--vae", "../models/vae-BF16.gguf",
+    models_dir = os.path.dirname(os.path.abspath(gguf_path)) or "../models"
+    cmd = [ggml_bin, "--models", models_dir]
+    if adapters_root:
+        cmd += ["--adapters", adapters_root]
+    cmd += [
         "--request", request_json,
         "--dump", dump_dir,
     ]
-    if adapter_dir:
-        cmd += ["--adapter", adapter_dir]
     print(f"[GGML] Running {os.path.basename(gguf_path)}...")
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     n = len([f for f in os.listdir(dump_dir) if f.endswith(".bin")])
