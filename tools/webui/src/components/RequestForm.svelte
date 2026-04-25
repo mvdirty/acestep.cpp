@@ -172,9 +172,8 @@
 							task: '',
 							request: { caption: '' }
 						};
-						const suffix = [synthJob.variant, t.task].filter((s) => s).join(' ');
 						const song: Song = {
-							name: suffix ? synthJob.name + ' (' + suffix + ')' : synthJob.name,
+							name: synthJob.name,
 							format: synthJob.format,
 							created: now + i,
 							caption: t.caption,
@@ -485,10 +484,8 @@
 
 			for (let i = audios.length - 1; i >= 0; i--) {
 				const r = expanded[i];
-				const task = r.task_type || 'text2music';
-				const suffix = [variant, task].filter((s) => s).join(' ');
 				const song = {
-					name: suffix ? baseName + ' (' + suffix + ')' : baseName,
+					name: baseName,
 					format: app.format,
 					created: now + i,
 					caption: r.caption,

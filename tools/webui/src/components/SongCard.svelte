@@ -11,6 +11,7 @@
 	} from '../lib/api.js';
 	import { saveJob, clearJob, putSong } from '../lib/db.js';
 	import type { Song } from '../lib/types.js';
+	import { displaySongName } from '../lib/songName.js';
 	import Waveform from './Waveform.svelte';
 	import Menu, { type MenuItem } from './Menu.svelte';
 
@@ -24,6 +25,10 @@
 
 	let isRef = $derived(app.refSongId === song.id);
 	let isSrc = $derived(app.srcSongId === song.id);
+
+	// "(variant task)" suffix rebuilt from the request, used for the card
+	// title and download filenames. Song.name itself stays the base name.
+	let displayName = $derived(displaySongName(song));
 
 	function toggleRef() {
 		if (isRef) {
@@ -146,7 +151,7 @@
 		const url = URL.createObjectURL(song.audio);
 		const a = document.createElement('a');
 		a.href = url;
-		const safe = song.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
+		const safe = displayName.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
 		const ext = song.format.startsWith('wav') ? '.wav' : '.mp3';
 		a.download = `${safe}${ext}`;
 		a.click();
@@ -162,7 +167,7 @@
 		const url = URL.createObjectURL(song.latents);
 		const a = document.createElement('a');
 		a.href = url;
-		const safe = song.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
+		const safe = displayName.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
 		a.download = `${safe}.vae`;
 		a.click();
 		URL.revokeObjectURL(url);
@@ -261,7 +266,7 @@
 				<Play size={14} />
 			{/if}
 		</button>
-		<span class="card-name">{song.name}</span>
+		<span class="card-name">{displayName}</span>
 		<Menu items={actionItems}>
 			{#snippet trigger()}<ChevronDown size={14} /> Menu{/snippet}
 		</Menu>
