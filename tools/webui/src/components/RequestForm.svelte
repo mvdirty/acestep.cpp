@@ -302,7 +302,7 @@
 		const latentsBlob = new Blob([buf], { type: 'application/octet-stream' });
 		const name = file.name.replace(/\.vae$/i, '') || 'Imported';
 		try {
-			const jobId = await vaeDecode(latentsBlob, app.format);
+			const jobId = await vaeDecode(latentsBlob, app.request);
 			await pollJob(jobId);
 			const { audios } = await jobResultBlobs(jobId);
 			if (!audios.length) throw new Error('Decode returned no audio');

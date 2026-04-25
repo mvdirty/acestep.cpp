@@ -621,23 +621,12 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
     return NULL;
 }
 
-// Latent T for the job. Identical across batch elements (all tracks share T).
-int ace_synth_job_T_latent(const AceSynthJob * job) {
-    return job ? job->state.T : 0;
-}
-
-// Transpose s.output planar [Oc, T] for one track to time-major [T, Oc] in dst.
-// dst must hold T * Oc floats.
-void ace_synth_job_extract_latent(const AceSynthJob * job, int track_idx, float * dst) {
-    const SynthState & s   = job->state;
-    const int          T   = s.T;
-    const int          Oc  = s.Oc;
-    const float *      src = s.output.data() + (size_t) track_idx * Oc * T;
-    for (int t = 0; t < T; t++) {
-        for (int c = 0; c < Oc; c++) {
-            dst[t * Oc + c] = src[c * T + t];
-        }
-    }
+// Pointer to the post-DiT latent for one track in s.output, time-major
+// [T*64] f32. Lives until ace_synth_job_free.
+const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, int * T_out) {
+    const SynthState & s = job->state;
+    *T_out               = s.T;
+    return s.output.data() + (size_t) track_idx * s.T * s.Oc;
 }
 
 // Phase 2: VAE decode all batch items and apply waveform splice for

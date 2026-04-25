@@ -72,17 +72,15 @@ static int synth_batch_run(AceSynth *                             ctx,
 
     // Capture one post-DiT latent per track, time-major [T*64], indexed to
     // match audio_out. Latents live in jobs[g]->state.output until run_vae
-    // frees the job; extraction happens before phase 2.
+    // frees the job; capture happens before phase 2.
     if (latents_out) {
-        const int total = off;
-        latents_out->resize((size_t) total);
+        latents_out->resize((size_t) off);
         for (int g = 0; g < n_groups; g++) {
             const int gn = (int) groups[g].size();
-            const int T  = ace_synth_job_T_latent(jobs[g]);
             for (int i = 0; i < gn; i++) {
-                std::vector<float> & dst = (*latents_out)[audio_off[g] + i];
-                dst.resize((size_t) T * 64);
-                ace_synth_job_extract_latent(jobs[g], i, dst.data());
+                int           T   = 0;
+                const float * src = ace_synth_job_get_latent(jobs[g], i, &T);
+                (*latents_out)[audio_off[g] + i].assign(src, src + (size_t) T * 64);
             }
         }
     }

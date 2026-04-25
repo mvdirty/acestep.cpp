@@ -137,7 +137,8 @@ struct SynthState {
 };
 
 // Job bridges phase 1 (DiT) and phase 2 (VAE). The latents live in state.output
-// as planar [batch_n, Oc, T] f32 until ace_synth_job_run_vae consumes them.
+// as time-major [batch_n, T, Oc=64] f32 until ace_synth_job_run_vae consumes
+// them.
 struct AceSynthJob {
     SynthState state;
     int        batch_n;

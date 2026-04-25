@@ -265,20 +265,29 @@ function parseMultipartTyped(buf: Uint8Array, boundary: string): SynthResult {
 // part you send: 'audio' goes encode (latents out), 'src_latents' goes
 // decode (audio out). Mutually exclusive, server rejects both or neither.
 // The result body carries only the opposite side: the client already holds
-// the one it just uploaded.
-export function vaeEncode(audio: Blob): Promise<string> {
+// the one it just uploaded. The full request JSON drives model selection,
+// output format, normalization and bitrate, exactly like /synth: encode
+// reads only `vae`, decode reads `vae` + `output_format` + `peak_clip` +
+// `mp3_bitrate`, the rest is silently ignored.
+export function vaeEncode(audio: Blob, request: AceRequest): Promise<string> {
 	const form = new FormData();
 	form.append('audio', audio, 'src.audio');
+	form.append(
+		'request',
+		new Blob([JSON.stringify(request)], { type: 'application/json' }),
+		'request.json'
+	);
 	return submitJob('vae', { method: 'POST', body: form });
 }
 
-export function vaeDecode(srcLatents: Blob, format: string): Promise<string> {
+export function vaeDecode(srcLatents: Blob, request: AceRequest): Promise<string> {
 	const form = new FormData();
 	form.append('src_latents', srcLatents, 'src.vae');
-	if (format) {
-		const body = JSON.stringify({ output_format: format });
-		form.append('request', new Blob([body], { type: 'application/json' }), 'request.json');
-	}
+	form.append(
+		'request',
+		new Blob([JSON.stringify(request)], { type: 'application/json' }),
+		'request.json'
+	);
 	return submitJob('vae', { method: 'POST', body: form });
 }
 

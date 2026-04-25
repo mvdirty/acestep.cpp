@@ -182,7 +182,7 @@
 		if (song.latents || song.id == null) return;
 		scanning = true;
 		try {
-			const jobId = await vaeEncode(song.audio);
+			const jobId = await vaeEncode(song.audio, app.request);
 			saveJob('lm', jobId);
 			await pollJob(jobId);
 			const latents = await jobResultLatents(jobId);

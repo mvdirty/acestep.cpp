@@ -76,15 +76,11 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     bool (*cancel)(void *) = nullptr,
                                     void * cancel_data     = nullptr);
 
-// Latent T (frames) for the job, identical for every track in the batch.
-// Valid as soon as Phase 1 has run.
-int ace_synth_job_T_latent(const AceSynthJob * job);
-
-// Write the post-DiT denoised latent for one track of the job into dst,
-// time-major [T_latent, 64] f32. dst must hold T_latent * 64 floats. This is
-// the buffer the VAE decoder consumes to produce the track's output audio,
-// so feeding it back through /vae decode reproduces the same audio.
-void ace_synth_job_extract_latent(const AceSynthJob * job, int track_idx, float * dst);
+// Access the post-DiT denoised latent for one track of the job, owned by the
+// job and valid until ace_synth_job_free. Layout is flat [T_latent * 64] f32
+// time-major, identical to the /vae wire format: feeding it to /vae decode
+// reproduces the track's output audio. *T_out is set to T_latent.
+const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, int * T_out);
 
 // Phase 2: VAE decode and waveform splice. Acquires the VAE decoder and FSQ
 // detokenizer from the store; in STRICT this evicts the DiT from phase 1
