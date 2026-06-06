@@ -51,6 +51,7 @@
 	let busySynth = $state(false);
 	let busy = $derived(busyLm || busySynth);
 	let fileInput: HTMLInputElement;
+	let dropActive = $state(false);
 	let saveFormatOpen = $state(false);
 
 	let d = $derived(app.props?.default);
@@ -224,13 +225,55 @@
 		fileInput.click();
 	}
 
+	function hasDraggedFiles(e: DragEvent): boolean {
+		return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+	}
+
+	function onWindowDragEnter(e: DragEvent) {
+		if (!hasDraggedFiles(e)) return;
+		dropActive = true;
+	}
+
+	function onWindowDragOver(e: DragEvent) {
+		if (!hasDraggedFiles(e)) return;
+		e.preventDefault();
+		dropActive = true;
+		if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+	}
+
+	function onWindowDragLeave(e: DragEvent) {
+		if (
+			e.clientX <= 0 ||
+			e.clientY <= 0 ||
+			e.clientX >= window.innerWidth ||
+			e.clientY >= window.innerHeight
+		) {
+			dropActive = false;
+		}
+	}
+
+	function onWindowDrop(e: DragEvent) {
+		if (!hasDraggedFiles(e)) return;
+		e.preventDefault();
+		dropActive = false;
+		openDroppedFiles(e.dataTransfer?.files);
+	}
+
 	function onFileSelected(e: Event) {
 		const input = e.target as HTMLInputElement;
 		const file = input.files?.[0];
 		if (!file) return;
 		// reset so the same file can be re-opened
 		input.value = '';
+		openFile(file);
+	}
 
+	function openDroppedFiles(files: FileList | File[] | undefined) {
+		const file = files?.[0];
+		if (file) openFile(file);
+	}
+
+	function openFile(file: File) {
 		const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
 		// JSON and YAML share the same load path: parse, push the request into
@@ -548,6 +591,22 @@
 		return v != null ? String(v) : '';
 	}
 </script>
+
+<svelte:window
+	ondragenter={onWindowDragEnter}
+	ondragover={onWindowDragOver}
+	ondragleave={onWindowDragLeave}
+	ondrop={onWindowDrop}
+/>
+
+{#if dropActive}
+	<div class="drop-overlay" aria-hidden="true">
+		<div class="drop-overlay-card">
+			<strong>Drop file to open</strong>
+			<span>JSON/YAML prompt, MP3, WAV or VAE latents</span>
+		</div>
+	</div>
+{/if}
 
 <form class="request-form" onsubmit={(e) => e.preventDefault()}>
 	<input
@@ -1156,6 +1215,32 @@
 		align-items: center;
 		justify-content: center;
 		gap: 0.3rem;
+	}
+	.drop-overlay {
+		position: fixed;
+		inset: 0;
+		z-index: 1000;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: rgb(0 0 0 / 35%);
+		pointer-events: none;
+	}
+	.drop-overlay-card {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 1rem 1.4rem;
+		border: 2px dashed var(--focus);
+		border-radius: 8px;
+		background: var(--bg-card);
+		color: var(--fg);
+		box-shadow: 0 0.5rem 2rem rgb(0 0 0 / 35%);
+	}
+	.drop-overlay-card span {
+		font-size: 0.85rem;
+		color: var(--fg-dim);
 	}
 	label {
 		display: flex;
